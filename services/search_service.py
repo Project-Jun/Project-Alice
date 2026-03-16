@@ -79,6 +79,7 @@ def handle_search(chat, ollama_client, user_input):
         f"Respond with ONLY the keyword, nothing else."
     )
     search_query = chat.send_message(query_prompt).text.strip()
+    print(f"[검색 엔진: {engine.upper()} / 검색어: {search_query}]")
 
     results = search(search_query, engine=engine)
     if not results or 'error' in results[0]:
