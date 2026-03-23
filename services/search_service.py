@@ -98,7 +98,7 @@ def handle_search(chat, ollama_client, user_input):
         f"검색 결과를 바탕으로 한국어로 간결하게 요약해줘. 목록도 함께 보여줘."
     )
     response = ollama_client.chat(
-        model='qwen2.5:7b',
+        model='gemma3:4b',
         messages=[
             {'role': 'system', 'content': "You are Alice, a personal AI assistant. Always respond in Korean. Never use Chinese."},
             {'role': 'user', 'content': summary_prompt}
@@ -116,7 +116,7 @@ def handle_followup(ollama_client, user_input, last_search_results):
     context += "\n"
 
     response = ollama_client.chat(
-        model='qwen2.5:7b',
+        model='gemma3:4b',
         messages=[
             {'role': 'system', 'content': "You are Alice, a personal AI assistant. Always respond in Korean. Never use Chinese."},
             {'role': 'user', 'content': f"{context}사용자 질문: {user_input}"}

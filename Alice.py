@@ -105,7 +105,7 @@ def process_command(user_input):
     else:  # CHAT
         print("[Ollama 모델을 기반으로 처리 중...]")
         response = ollama_client.chat(
-            model='qwen2.5:7b',
+            model='gemma3:4b',
             messages=[
                 {
                     'role': 'system',
@@ -124,7 +124,7 @@ def process_command(user_input):
 
 if __name__ == '__main__':
     print("=" * 40)
-    print("    안녕하세요! 저는 AI 비서 Alice예요.")
+    print("    안녕하세요! AI 비서 Alice예요.")
     print("    무엇을 도와드릴까요?")
     print("=" * 40)
     print("('종료' 입력시 종료)\n")
