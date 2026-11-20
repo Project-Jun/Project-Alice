@@ -1,0 +1,52 @@
+# AI 비서 설정 파일
+# 이 파일을 수정하여 API 키와 설정을 변경하세요
+
+llm:
+  # 사용할 제공자: "claude", "openai", "ollama"
+  provider: "claude"
+  
+  claude:
+    api_key: "YOUR_CLAUDE_API_KEY"
+    model: "claude-opus-4-6"  # claude-sonnet-4-6, claude-haiku-4-5-20251001
+  
+  openai:
+    api_key: "YOUR_OPENAI_API_KEY"
+    model: "gpt-4o"
+  
+  ollama:
+    base_url: "http://localhost:11434"
+    model: "llama3"  # llama3, mistral, gemma 등 설치된 모델명
+
+voice:
+  enabled: true
+  # STT 엔진: "whisper" (로컬) 또는 "google" (온라인)
+  stt_engine: "whisper"
+  whisper_model: "base"  # tiny, base, small, medium, large
+  # TTS 엔진: "edge" (Microsoft Edge TTS) 또는 "pyttsx3" (로컬)
+  tts_engine: "edge"
+  tts_voice: "ko-KR-SunHiNeural"  # 한국어 여성 목소리
+
+email:
+  # Gmail API 사용 시 credentials.json 파일 필요
+  provider: "gmail"
+  credentials_file: "data/credentials.json"
+  # 또는 SMTP 직접 사용
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: "your@gmail.com"
+  smtp_password: "your_app_password"
+
+search:
+  # "duckduckgo" (무료), "serper" (API키 필요), "google" (API키 필요)
+  engine: "duckduckgo"
+  serper_api_key: ""
+  max_results: 5
+
+database:
+  path: "data/assistant.db"
+
+ui:
+  theme: "dark"  # "dark" or "light"
+  font_size: 13
+  window_width: 1200
+  window_height: 800

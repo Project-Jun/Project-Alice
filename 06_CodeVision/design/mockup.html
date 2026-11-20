@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CodeVision 목업</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
+<style>
+:root{--text-primary:#1f1e1d;--text-secondary:#5e5d59;--text-muted:#8b8a85;--text-disabled:rgba(31,30,29,.35);
+--text-accent:#185FA5;--text-danger:#A32D2D;--text-success:#3B6D11;--text-warning:#854F0B;--text-pro:#534AB7;
+--surface-0:#f0eee6;--surface-1:#faf9f5;--surface-2:#ffffff;--surface-3:#ffffff;--surface-panel:#ffffff;--surface-popover:#ffffff;
+--bg-neutral:rgba(31,30,29,.05);--bg-accent:#E6F1FB;--bg-accent-muted:rgba(55,138,221,.1);--bg-danger:#FCEBEB;--bg-success:#EAF3DE;--bg-warning:#FAEEDA;--bg-pro:#EEEDFE;
+--bg-tint-violet:#EEEDFE;--text-tint-violet:#534AB7;--bg-tint-aqua:#E1F5EE;--text-tint-aqua:#0F6E56;--bg-tint-blue:#E6F1FB;--text-tint-blue:#185FA5;
+--bg-tint-orange:#FAECE7;--text-tint-orange:#993C1D;--bg-tint-yellow:#FAEEDA;--text-tint-yellow:#854F0B;--bg-tint-green:#EAF3DE;--text-tint-green:#3B6D11;
+--bg-tint-red:#FCEBEB;--text-tint-red:#A32D2D;--bg-tint-magenta:#FBEAF0;--text-tint-magenta:#993556;
+--border:rgba(31,30,29,.15);--border-strong:rgba(31,30,29,.3);--border-stronger:rgba(31,30,29,.45);
+--border-accent:#85B7EB;--border-danger:#F09595;--border-success:#97C459;--border-warning:#EF9F27;
+--fill-accent:#378ADD;--on-accent:#ffffff;--fill-ghost-hover:rgba(31,30,29,.05);--fill-ghost-selected:rgba(31,30,29,.09);
+--radius:8px;--pad-sm:8px;--pad-md:12px;--pad-lg:16px;--pad-xl:24px;--gap-xs:4px;--gap-sm:8px;--gap-md:12px;--gap-lg:16px;--gap-xl:24px;
+--font-sans:"Segoe UI","Malgun Gothic",system-ui,sans-serif;--font-mono:Consolas,"Cascadia Mono",monospace;--font-voice:Georgia,"Batang",serif;
+--page:#faf9f5}
+@media (prefers-color-scheme: dark){:root{--text-primary:#f2f0e8;--text-secondary:#c3c1b8;--text-muted:#8f8d86;--text-disabled:rgba(242,240,232,.35);
+--text-accent:#85B7EB;--text-danger:#F09595;--text-success:#97C459;--text-warning:#FAC775;--text-pro:#AFA9EC;
+--surface-0:#1c1c1b;--surface-1:#262624;--surface-2:#30302e;--surface-3:#3a3a37;--surface-panel:#30302e;--surface-popover:#3a3a37;
+--bg-neutral:rgba(242,240,232,.06);--bg-accent:#0C447C;--bg-accent-muted:rgba(55,138,221,.1);--bg-danger:#791F1F;--bg-success:#27500A;--bg-warning:#633806;--bg-pro:#3C3489;
+--bg-tint-violet:#3C3489;--text-tint-violet:#AFA9EC;--bg-tint-aqua:#085041;--text-tint-aqua:#5DCAA5;--bg-tint-blue:#0C447C;--text-tint-blue:#85B7EB;
+--bg-tint-orange:#712B13;--text-tint-orange:#F0997B;--bg-tint-yellow:#633806;--text-tint-yellow:#FAC775;--bg-tint-green:#27500A;--text-tint-green:#97C459;
+--bg-tint-red:#791F1F;--text-tint-red:#F09595;--bg-tint-magenta:#72243E;--text-tint-magenta:#ED93B1;
+--border:rgba(242,240,232,.13);--border-strong:rgba(242,240,232,.24);--border-stronger:rgba(242,240,232,.4);
+--border-accent:#378ADD;--border-danger:#E24B4A;--border-success:#639922;--border-warning:#BA7517;
+--fill-ghost-hover:rgba(242,240,232,.075);--fill-ghost-selected:rgba(242,240,232,.15);
+--page:#262624}}
+html,body{margin:0;padding:0;background:var(--page);color:var(--text-primary);font-family:var(--font-sans);font-size:16px;line-height:1.7}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+h1,h2,h3{font-weight:500;color:var(--text-primary)}
+button{font-family:inherit;font-size:14px;color:var(--text-primary);background:transparent;border:0.5px solid var(--border-strong);border-radius:var(--radius);height:36px;padding:0 12px;cursor:pointer}
+button:hover{background:var(--surface-1)}
+.page{max-width:680px;margin:0 auto;padding:24px 16px 48px}
+</style>
+</head>
+<body>
+<main class="page">
+<h2 class="sr-only">CodeVision 화면 목업으로, 프로젝트의 폴더와 파일을 위에서 아래로 이어지는 원형 노드 도식으로 보여 주고 아래 패널에 선택한 파일의 쉬운 설명과 주요 함수, 연결된 파일을 보여 준다.</h2>
+<style>
+.cv{font-size:13px;color:var(--text-primary);padding:.5rem 0}
+.cv .bd{flex:none;font-size:11px;line-height:16px;padding:1px 6px;border-radius:var(--radius);white-space:nowrap;display:inline-flex;align-items:center;gap:3px}
+.cv .bd .ti{width:1em;flex:none}
+.cv .tu{background:var(--bg-tint-violet);color:var(--text-tint-violet)}.cv .ts{background:var(--bg-tint-aqua);color:var(--text-tint-aqua)}
+.cv .tn{border:0.5px solid var(--border-strong);padding:.5px 5.5px;color:var(--text-secondary)}.cv .tw{background:var(--bg-warning);color:var(--text-warning)}.cv .ta{background:var(--bg-accent);color:var(--text-accent)}.cv .tc{background:var(--bg-neutral);color:var(--text-secondary)}
+.cv .chip{font-size:12px;height:auto;min-height:0;padding:3px 9px;line-height:1.4}
+.cv .card{background:var(--surface-2);border:0.5px solid var(--border);border-radius:12px;min-width:0}
+.cv .dg{padding:16px 16px 14px}
+.cv .cvd{position:relative}
+.cv .cvd>svg{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
+.cv .nd{position:absolute;width:max-content}
+.cv .hit{display:flex;align-items:flex-start;cursor:pointer;border-radius:var(--radius);outline:none}
+.cv .hit:focus-visible{outline:2px solid var(--border-accent);outline-offset:3px}
+.cv .dot{flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#FFFFFF}
+.cv .sel .dot{outline:2px solid var(--border-accent);outline-offset:2px}
+.cv .hit:hover .nm{text-decoration:underline;text-decoration-color:var(--border-stronger);text-underline-offset:3px}
+.cv .lb{display:flex;flex-direction:column;align-items:flex-start;min-width:0}
+.cv .nl,.cv .sl{display:flex;align-items:center;gap:5px;height:18px;max-width:100%;min-width:0}
+.cv .b1,.cv .b2{display:contents}
+.cv .nm{flex:none;font-size:13px;font-weight:500;line-height:18px;white-space:nowrap}
+.cv .sm{min-width:0;font-size:12px;line-height:18px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cv .tg{display:flex;margin-top:3px}.cv .tg:empty{display:none}
+.cv .tgl{position:absolute;width:18px;height:18px;min-height:0;padding:0;line-height:1;border-radius:var(--radius);background:var(--surface-2);border:0.5px solid var(--border-stronger);display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--text-secondary)}
+.cv .tgl::after{content:"";position:absolute;left:0;top:0;right:-6px;bottom:-6px;border-radius:var(--radius)}
+.cv .tgl:hover{background:var(--surface-1)}
+.cv .tgl:focus-visible{outline:2px solid var(--border-accent);outline-offset:1px}
+.cv .mz{position:absolute;left:0;top:0;visibility:hidden;display:flex;flex-direction:column;align-items:flex-start;pointer-events:none}
+.cv .lg{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-top:12px;padding-top:12px;border-top:0.5px solid var(--border);font-size:12px;color:var(--text-secondary)}
+.cv .lg>span{display:inline-flex;align-items:center;gap:6px}
+.cv .lgd{width:10px;height:10px;border-radius:50%;flex:none}
+.cv .lgt{width:16px;height:16px;border-radius:var(--radius);border:0.5px solid var(--border-stronger);display:inline-flex;align-items:center;justify-content:center;font-size:11px}
+.cv .sc{border-top:0.5px solid var(--border);margin-top:12px;padding-top:12px;min-width:0}
+.cv .pg{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 24px}
+@media (max-width:560px){.cv .pg{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:480px){.cv .dg{padding:14px 12px 12px}}
+</style>
+<div class="cv">
+<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;font-size:12px;color:var(--text-muted)"><i class="ti ti-brand-github" style="font-size:14px;color:var(--text-secondary)" aria-hidden="true"></i><span style="color:var(--text-secondary)">GitHub</span><span aria-hidden="true">·</span><span>my-todo-app</span><span aria-hidden="true">·</span><span style="display:inline-flex;align-items:center;gap:2px"><i class="ti ti-git-branch" aria-hidden="true"></i>main 브랜치</span></div>
+<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+<i class="ti ti-folder-open" style="font-size:20px;color:var(--text-secondary)" aria-hidden="true"></i>
+<span style="font-size:15px;font-weight:500">my-todo-app</span>
+<span style="font-size:12px;color:var(--text-muted)">폴더 5 · 파일 12 · 시작점 2 · 정리 후보 1</span>
+<span style="margin-left:auto;font-size:12px;color:var(--text-muted);display:inline-flex;align-items:center;gap:4px"><i class="ti ti-eye-off" aria-hidden="true"></i>node_modules, .venv 등 숨김</span>
+</div>
+<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;background:var(--bg-neutral);border-radius:var(--radius);margin-bottom:12px;font-size:12px;color:var(--text-muted)">
+<span style="color:var(--text-secondary)">한눈에 보기</span>
+<span class="bd tu" style="font-size:12px">화면 · React</span>
+<span style="display:inline-flex;align-items:center;gap:2px">요청<i class="ti ti-arrow-right" aria-hidden="true"></i></span>
+<span class="bd ts" style="font-size:12px">서버 · FastAPI</span>
+<span style="display:inline-flex;align-items:center;gap:2px">저장<i class="ti ti-arrow-right" aria-hidden="true"></i></span>
+<span class="bd ts" style="font-size:12px">DB · SQLite</span>
+</div>
+<div class="card dg">
+<div class="cvd" id="cvd" role="group" aria-label="프로젝트 구조 도식"><svg aria-hidden="true"><path style="stroke:var(--border-stronger);fill:none" stroke-width="1" stroke-linecap="square"/></svg></div>
+<div class="lg">
+<span><span class="lgd" style="background:#534AB7"></span>화면 코드</span>
+<span><span class="lgd" style="background:#0F6E56"></span>서버 코드</span>
+<span><span class="lgd" style="background:#5F5E5A"></span>문서·설정</span>
+<span><span class="lgd" style="background:#BA7517"></span>정리 후보</span>
+<span><span class="bd tn"><i class="ti ti-player-play" aria-hidden="true"></i>시작점</span>처음 실행되는 파일</span>
+<span><span class="bd ta">연결</span>선택한 파일과 이어진 파일</span>
+<span><span class="lgt"><i class="ti ti-plus" aria-hidden="true"></i></span>폴더 펼치기·접기</span>
+</div>
+</div>
+<div id="cv-panel" class="card" style="padding:1rem 1.25rem;margin-top:12px"><span style="color:var(--text-muted)">파일을 선택하세요</span></div>
+</div>
+<script>
+(()=>{
+const D={
+root:{n:'my-todo-app',p:'my-todo-app/',t:'d',a:'ot',s:'할 일 관리 웹앱',d:'화면(frontend)과 서버(backend) 두 부분으로 나뉘어 있어요. 화면에서 버튼을 누르면 api.js가 서버에 요청을 보내고, 서버가 DB에 저장해요.',k:['fe','be','old','readme']},
+fe:{n:'frontend',p:'frontend/',t:'d',a:'ui',s:'사용자가 보는 화면 (React)',d:'브라우저에 뜨는 화면 코드예요. main.jsx에서 시작해서 App, TodoList, TodoItem 순서로 화면이 조립돼요.',k:['src','pkg']},
+src:{n:'src',p:'frontend/src/',t:'d',a:'ui',s:'화면 소스 코드',d:'실제 화면 코드가 모여 있어요. 서버와 주고받는 일은 api.js가 맡아요.',k:['comp','api','app','mainjsx']},
+comp:{n:'components',p:'frontend/src/components/',t:'d',a:'ui',s:'화면 부품 모음',d:'목록, 한 줄 항목처럼 여러 번 다시 쓰는 화면 조각이에요.',k:['item','list']},
+item:{n:'TodoItem.jsx',p:'frontend/src/components/TodoItem.jsx',a:'ui',l:33,s:'할 일 한 줄',d:'할 일 하나를 한 줄로 보여줘요. 체크하면 완료 표시, 휴지통을 누르면 삭제 요청을 보내요.',f:[['TodoItem()','한 줄 그리기'],['handleDelete()','삭제 버튼 동작']],u:['api'],b:['list']},
+list:{n:'TodoList.jsx',p:'frontend/src/components/TodoList.jsx',a:'ui',l:41,s:'할 일 목록 표시',d:'화면이 처음 뜰 때 서버에서 목록을 받아 와서, 할 일마다 TodoItem을 하나씩 그려요.',f:[['TodoList()','목록 화면 그리기'],['useEffect()','처음 뜰 때 목록 불러오기']],u:['api','item'],b:['app']},
+api:{n:'api.js',p:'frontend/src/api.js',a:'ui',l:34,s:'서버 요청 함수 모음',d:'화면과 서버를 잇는 다리예요. 목록 조회, 추가, 삭제 요청을 서버의 /todos 주소로 보내요.',f:[['fetchTodos()','할 일 목록 가져오기'],['addTodo(title)','새 할 일 저장하기'],['deleteTodo(id)','할 일 지우기']],u:['todos'],b:['list','item'],h:['todos']},
+app:{n:'App.jsx',p:'frontend/src/App.jsx',a:'ui',l:27,s:'화면 전체 틀',d:'제목, 입력창, 할 일 목록을 배치하는 화면의 뼈대예요.',f:[['App()','전체 레이아웃 그리기']],u:['list'],b:['mainjsx']},
+mainjsx:{n:'main.jsx',p:'frontend/src/main.jsx',a:'ui',l:9,e:1,s:'화면 시작점',d:'브라우저가 가장 먼저 실행하는 파일이에요. App을 페이지에 붙이는 일만 해요.',f:[['createRoot().render()','App을 화면에 붙이기']],u:['app'],b:[]},
+pkg:{n:'package.json',p:'frontend/package.json',a:'ot',l:22,i:'ti-file-settings',s:'라이브러리·실행 설정',d:'사용하는 라이브러리(React 등) 목록과 실행 명령(npm run dev)이 적혀 있어요.',f:[],u:[],b:[]},
+be:{n:'backend',p:'backend/',t:'d',a:'sv',s:'데이터 처리 서버 (FastAPI)',d:'화면에서 온 요청을 받아 DB에 저장하거나 꺼내 줘요. main.py에서 시작해요.',k:['routes','db','mainpy','models']},
+routes:{n:'routes',p:'backend/routes/',t:'d',a:'sv',s:'주소별 요청 처리',d:'/todos 같은 주소로 요청이 오면 무엇을 할지 정해 둔 곳이에요.',k:['todos']},
+todos:{n:'todos.py',p:'backend/routes/todos.py',a:'sv',l:58,s:'할 일 API',d:'/todos 주소로 온 요청을 처리해요. 목록 주기, 새로 저장하기, 지우기 세 가지 일을 해요.',f:[['get_todos()','GET · 목록 조회'],['create_todo()','POST · 새 할 일 저장'],['delete_todo(id)','DELETE · 할 일 삭제']],u:['models','db'],b:['mainpy','api'],h:['api']},
+db:{n:'database.py',p:'backend/database.py',a:'sv',l:21,s:'DB 연결 준비',d:'SQLite 데이터베이스 파일(todo.db)에 연결하는 설정이에요.',f:[['engine','DB 연결 만들기'],['get_db()','요청마다 DB 연결 빌려주기']],u:[],b:['mainpy','todos','models']},
+mainpy:{n:'main.py',p:'backend/main.py',a:'sv',l:18,e:1,s:'서버 시작점',d:'서버를 켜고 /todos 담당 코드를 등록해요. 서버를 실행하면 여기서부터 시작돼요.',f:[['app = FastAPI()','서버 만들기'],['include_router()','주소 담당 코드 등록']],u:['todos','db'],b:[]},
+models:{n:'models.py',p:'backend/models.py',a:'sv',l:15,s:'할 일 데이터 모양',d:'할 일 하나가 어떤 정보(번호, 제목, 완료 여부)를 갖는지 정해요. DB 표의 설계도예요.',f:[['class Todo','id · title · done']],u:['db'],b:['todos']},
+old:{n:'helpers_old.py',p:'helpers_old.py',a:'ot',l:47,o:1,i:'ti-file-alert',s:'사용되지 않는 파일',d:'어느 파일에서도 불러 쓰지 않아요. AI가 예전에 만들었다가 남겨 둔 버전일 가능성이 높아요.',f:[['format_date()','날짜를 글자로 바꾸기'],['old_save_todo()','예전 저장 방식']],u:[],b:[]},
+readme:{n:'README.md',p:'README.md',a:'ot',l:30,i:'ti-file-text',s:'프로젝트 소개 문서',d:'프로젝트 설명과 실행 방법이 적혀 있어요.',f:[],u:[],b:[]}
+};
+const AR={ui:['화면 코드','tu'],sv:['서버 코드','ts'],ot:['문서·설정','tn']},FC={ui:'#534AB7',sv:'#0F6E56',ot:'#5F5E5A'};
+const MT=[{RF:22,RL:18,GP:8,G0:14,G1:36,IF:20,IL:16,V:100},{RF:20,RL:16,GP:8,G0:10,G1:28,IF:18,IL:14,V:96}];
+const I=Object.keys(D),dir=i=>D[i].t==='d',par={},DS={},DP={};
+I.forEach(i=>(D[i].k||[]).forEach(c=>par[c]=i));
+const anc=i=>{const a=[];while(par[i])a.unshift(i=par[i]);return a};
+const des=i=>(D[i].k||[]).flatMap(c=>[c,...des(c)]);
+I.forEach(i=>{DS[i]=des(i);DP[i]=anc(i).length});
+const rel=i=>i&&!dir(i)?[...new Set([...D[i].u,...D[i].b])]:[];
+const fill=i=>D[i].o?'#BA7517':FC[D[i].a];
+const bd=(c,t,ic)=>`<span class="bd ${c}">${ic?`<i class="ti ${ic}" aria-hidden="true"></i>`:''}${t}</span>`;
+const SB=bd('tn','시작점','ti-player-play'),OB=bd('tw','정리 후보','ti-alert-triangle');
+const PR={};I.forEach(i=>PR[i]=[]);
+I.forEach(f=>{if(dir(f))return;D[f].u.forEach(x=>PR[x].push(bd('ta',D[f].n+'에서 사용')));D[f].b.forEach(x=>PR[x].push(bd('ta',D[f].n+' 사용')))});
+I.forEach(g=>{if(!dir(g))return;const n=Math.max(0,...I.filter(f=>!dir(f)&&!DS[g].includes(f)).map(f=>rel(f).filter(x=>DS[g].includes(x)).length));if(n)PR[g].push(bd('ta','연결 '+n+'개'));PR[g].push(bd('tc',D[g].k.length+'개 항목'))});
+let path=['root','fe','src'],sel='api',fo='api',W=0,PL,POS={},ORD=[];
+const MW={},SW={},BW={},E={};
+const Cv=document.getElementById('cvd'),Pn=document.getElementById('cv-panel'),Sv=Cv.querySelector('svg'),PT=Sv.querySelector('path');
+const vis=i=>anc(i).every(a=>path.includes(a));
+I.forEach(i=>{const x=D[i],f=dir(i),n=document.createElement('div');
+n.className='nd';n.dataset.cvBox=i;
+n.innerHTML=`<div class="hit" data-cv-id="${i}" tabindex="0" role="button"><span class="dot"><i class="ti ${f?'ti-folder':x.i||'ti-file-code'}" aria-hidden="true"></i></span><span class="lb"><span class="nl"><span class="nm" data-cv-name>${x.n}</span>${x.e?SB:''}${x.o?OB:''}<span class="b1"></span></span><span class="sl"><span class="b2"></span><span class="sm" title="${x.s}">${x.s}</span></span><span class="tg"></span></span></div>`+(f?`<button class="tgl" type="button" data-cv-toggle="${i}"></button>`:'');
+Cv.appendChild(n);
+const h=n.firstChild;
+E[i]={n,h,dot:h.firstChild,ic:h.firstChild.firstChild,lb:h.lastChild,nl:h.querySelector('.nl'),b1:h.querySelector('.b1'),b2:h.querySelector('.b2'),tg:h.querySelector('.tg'),t:n.querySelector('.tgl')};
+h.addEventListener('click',()=>act(i));
+h.addEventListener('keydown',e=>key(e,i));
+if(f)E[i].t.addEventListener('click',()=>tog(i));
+});
+function measure(){
+const z=document.createElement('div');z.className='mz';
+z.innerHTML=I.map(i=>{const x=D[i];return`<span class="nl"><span class="nm">${x.n}</span>${x.e?SB:''}${x.o?OB:''}</span><span class="sm">${x.s}</span><span class="tg">${PR[i].join('')}</span>`}).join('');
+Cv.appendChild(z);
+const c=z.children,w=e=>Math.ceil(e.getBoundingClientRect().width);
+I.forEach((i,k)=>{MW[i]=w(c[3*k]);SW[i]=w(c[3*k+1]);BW[i]=Math.max(0,...[...c[3*k+2].children].map(w))});
+z.remove();
+}
+const sum=a=>a.reduce((s,v)=>s+v,0);
+const wf=(lo,hi,B)=>{let a=0,b=Math.max(...hi);for(let k=0;k<30;k++){const t=(a+b)/2;sum(hi.map((h,j)=>Math.max(lo[j],Math.min(h,t))))>B?b=t:a=t}return hi.map((h,j)=>Math.max(lo[j],Math.min(h,a)))};
+function fam(L,m){
+const n=L.length,r=L.map(i=>dir(i)?m.RF:m.RL),lo=L.map(i=>Math.max(MW[i],BW[i])),hi=L.map((i,j)=>Math.max(lo[j],SW[i])),S0=2*sum(r)+n*m.GP;
+let g=m.G1,C=hi;
+if(S0+sum(hi)+(n-1)*g>W){g=(W-S0-sum(hi))/Math.max(1,n-1);
+if(g<m.G0){g=m.G0;const B=W-S0-(n-1)*g,fh=hi.map((h,j)=>dir(L[j])?h:lo[j]);if(sum(lo)>B)return null;C=sum(fh)>B?wf(lo,fh,B):wf(fh,hi,B)}}
+return{L,r,C,g,m};
+}
+const xs=(F,g)=>{const x=[F.r[0]];for(let j=1;j<F.L.length;j++)x.push(x[j-1]+F.r[j-1]+F.m.GP+F.C[j-1]+g+F.r[j]);return x};
+function place(F,px,U){
+const n=F.L.length,G=[F.g];let B=null;
+if(px!=null&&n>1)for(let g=Math.ceil(F.m.G0-2);g<=3*F.m.G1;g++)G.push(g);
+for(const g of G){const x=xs(F,g),R=W-(x[n-1]+F.r[n-1]+F.m.GP+F.C[n-1]);if(R<-.5)continue;
+const c=px==null?R/2:Math.max(0,Math.min(R,px-(x[0]+x[n-1])/2)),c0=Math.round(c);
+for(let s=-40;s<=40;s++){const o=c0+s;if(o<0||o>Math.max(0,R))continue;
+const X=x.map(v=>Math.round(v+o));let p=Math.abs(g-F.g)+2*Math.abs(s);
+if(px!=null)X.forEach(v=>{const d=Math.abs(v-px);if(d>.5&&d<14)p+=1e3;U.forEach(u=>{const e=Math.abs(v-u);p+=e<.5?60:e<52?(52-e)*4:0})});
+if(!B||p<B.p)B={p,X}}}
+return B.X;
+}
+function plan(){
+for(const m of MT){const F={};let ok=1;I.filter(dir).forEach(f=>{if(ok){const v=fam(D[f].k,m);v?F[f]=v:ok=0}});if(ok){m.F=F;return{m,rows:1}}}
+return{m:MT[W<480?1:0],rows:0};
+}
+const rd=i=>dir(i)?PL.m.RF:PL.m.RL;
+function draw(){
+const m=PL.m,S=[];POS={};ORD=[];
+const wk=i=>{ORD.push(i);if(path.includes(i))D[i].k.forEach(wk)};wk('root');
+if(PL.rows){
+const V=m.V,T=Math.max(m.RF,18)+8,F=m.F,R=[['root'],...path.map(f=>D[f].k)],X1=place(F.root,null,[]),rx=Math.round((X1[0]+X1[X1.length-1])/2);
+POS.root={x:rx,y:T,C:Math.min(Math.max(MW.root,BW.root,SW.root),W-rx-m.RF-m.GP)};
+for(let d=1;d<R.length;d++){const p=path[d-1],q=POS[p],Fm=F[p],X=d===1?X1:place(Fm,q.x,R[d-1].filter(i=>i!==p).map(i=>POS[i].x)),y=T+d*V,yb=q.y+V/2+.5,a=Math.min(q.x,...X),b=Math.max(q.x,...X);
+Fm.L.forEach((i,j)=>POS[i]={x:X[j],y,C:Fm.C[j]});
+if(X.length===1&&X[0]===q.x)S.push(`M${q.x+.5} ${q.y+rd(p)-1}V${y-rd(Fm.L[0])+1}`);
+else{S.push(`M${q.x+.5} ${q.y+rd(p)-1}V${yb}M${a+.5} ${yb}H${b+.5}`);X.forEach((x,j)=>S.push(`M${x+.5} ${yb}V${y-rd(Fm.L[j])+1}`))}}
+}else{
+const IND=m.RF+12,PI=2*m.RF+12,T=Math.max(m.RF,18)+6;
+ORD.forEach((i,k)=>{const x=m.RF+DP[i]*IND;POS[i]={x,y:T+k*PI,C:W-x-m.RF-m.GP}});
+path.forEach(f=>{const q=POS[f],ks=D[f].k;if(!q)return;S.push(`M${q.x+.5} ${q.y+rd(f)-1}V${POS[ks[ks.length-1]].y+.5}`);ks.forEach(c=>S.push(`M${q.x+.5} ${POS[c].y+.5}H${POS[c].x-rd(c)+1}`))});
+}
+PT.setAttribute('d',S.join(''));
+I.forEach(i=>{const q=POS[i],e=E[i];if(!q){e.n.style.display='none';return}
+const r=rd(i),t=Math.max(r,18),f=dir(i);
+e.n.style.display='';e.n.style.left=q.x-r+'px';e.n.style.top=q.y-t+'px';
+e.dot.style.cssText=`width:${2*r}px;height:${2*r}px;margin-top:${t-r}px;font-size:${f?m.IF:m.IL}px;background:${fill(i)}`;
+e.lb.style.margin=`${t-18}px 0 0 ${PL.rows?m.GP:m.RF-r+m.GP}px`;e.lb.style.maxWidth=Math.floor(q.C)+'px';
+if(f){const c=Math.round(r*.707-9);e.t.style.left=r+c+'px';e.t.style.top=t+c+'px'}});
+}
+function upd(){
+const af=fo&&POS[fo]?fo:null,A=af&&D[af];
+I.forEach(i=>{const e=E[i],x=D[i],o=path.includes(i),f=dir(i),q=POS[i];
+if(f){e.ic.className='ti '+(o?'ti-folder-open':'ti-folder');e.t.innerHTML=`<i class="ti ti-${o?'minus':'plus'}" aria-hidden="true"></i>`;const l=x.n+(o?' 접기':' 펼치기');e.t.setAttribute('aria-expanded',o);e.t.setAttribute('aria-label',l);e.t.title=l}
+e.n.classList.toggle('sel',i===sel);e.h.setAttribute('aria-current',i===sel);
+let g='';
+if(q){if(A&&A.b.includes(i))g=bd('ta',A.n+' 사용');else if(A&&A.u.includes(i))g=bd('ta',A.n+'에서 사용');else if(f&&!o){const c=af?rel(af).filter(z=>DS[i].includes(z)).length:0;g=c?bd('ta','연결 '+c+'개'):bd('tc',x.k.length+'개 항목')}}
+e.b1.innerHTML=e.b2.innerHTML=e.tg.innerHTML='';
+if(g){if(PL.rows)e.tg.innerHTML=g;else{e.b1.innerHTML=g;if(e.nl.scrollWidth>q.C+.5){e.b1.innerHTML='';e.b2.innerHTML=g}}}
+});
+}
+function fit(){
+const cr=Cv.getBoundingClientRect(),L={};let H=0,bad=0;
+I.forEach(i=>{const q=POS[i];if(!q)return;const b=E[i].n.getBoundingClientRect();H=Math.max(H,b.bottom-cr.top,q.y+rd(i)+4);if(b.left<cr.left-.5||b.right>cr.right+.5)bad=1;(L[q.y]=L[q.y]||[]).push(b)});
+Object.values(L).forEach(l=>{l.sort((a,b)=>a.left-b.left);for(let j=1;j<l.length;j++)if(l[j].left<l[j-1].right+2)bad=1});
+H=Math.ceil(H+2);Cv.style.height=H+'px';Sv.setAttribute('width',W);Sv.setAttribute('height',H);
+return!bad;
+}
+const lab=t=>`<div style="font-size:12px;color:var(--text-muted);margin:0 0 6px">${t}</div>`;
+const chips=(ids,h)=>ids&&ids.length?`<div style="display:flex;flex-wrap:wrap;gap:6px">${ids.map(i=>`<button class="chip" data-go="${i}">${D[i].n}${h&&h.includes(i)?' · HTTP':''}</button>`).join('')}</div>`:`<div style="font-size:12px;color:var(--text-muted)">없음</div>`;
+function panel(){
+const id=sel,x=D[id],ar=AR[x.a],dr=dir(id);
+let tags=x.o?OB:id==='root'?bd('tn','프로젝트'):bd(ar[1],ar[0]);
+if(x.e)tags+=SB;
+const icon=dr?(path.includes(id)?'ti-folder-open':'ti-folder'):(x.i||'ti-file-code');
+let h=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="flex:none;width:28px;height:28px;border-radius:50%;background:${fill(id)};color:#FFFFFF;display:inline-flex;align-items:center;justify-content:center"><i class="ti ${icon}" style="font-size:15px" aria-hidden="true"></i></span><span style="font-size:15px;font-weight:500">${x.n}</span>${tags}<span style="margin-left:auto;font-size:12px;color:var(--text-muted)">${dr?x.k.length+'개 항목':x.l+'줄'}</span></div>`;
+h+=`<div style="font-family:var(--font-mono);font-size:12px;color:var(--text-muted);margin:4px 0 12px;overflow-wrap:anywhere">${x.p}</div>`;
+h+=`<div style="font-size:14px;font-weight:500;margin-bottom:4px">${x.s}</div><div style="font-size:13px;line-height:1.65;color:var(--text-secondary)">${x.d}</div>`;
+if(dr)h+=`<div class="sc">${lab('들어 있는 것')+chips(x.k)}</div>`;
+else{const c=`<div class="sc">${lab('이 파일이 쓰는 파일')+chips(x.u,x.h)}<div style="height:10px"></div>${lab('이 파일을 쓰는 파일')+chips(x.b,x.h)}</div>`;
+h+=x.f.length?`<div class="pg"><div class="sc">${lab('주요 함수')+x.f.map(([k,v])=>`<div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-bottom:4px"><code style="font-family:var(--font-mono);font-size:12px">${k}</code><span style="font-size:12px;color:var(--text-secondary)">${v}</span></div>`).join('')}</div>${c}</div>`:c}
+Pn.innerHTML=h;
+Pn.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>{const g=b.dataset.go;act(g);E[g].h.focus({preventScroll:true})}));
+}
+function render(){draw();upd();if(!fit()&&PL.rows){PL={m:MT[W<480?1:0],rows:0};draw();upd();fit()}panel()}
+function act(i){if(dir(i)){if(!path.includes(i))path=[...anc(i),i]}else{if(!vis(i))path=anc(i);fo=i}sel=i;render()}
+function tog(i){const k=path.indexOf(i);path=k<0?[...anc(i),i]:path.slice(0,k);if(!vis(sel))sel=i;render()}
+function key(e,i){
+const k=e.key;
+if(k==='Enter'||k===' '){e.preventDefault();act(i);return}
+const s=par[i]?D[par[i]].k:['root'],j=s.indexOf(i),o=ORD.indexOf(i),dn=path.includes(i)?D[i].k[0]:null;
+const t=PL.rows?(k==='ArrowRight'?s[j+1]:k==='ArrowLeft'?s[j-1]:k==='ArrowUp'?par[i]:k==='ArrowDown'?dn:null):(k==='ArrowDown'?ORD[o+1]:k==='ArrowUp'?ORD[o-1]:k==='ArrowLeft'?par[i]:k==='ArrowRight'?dn:null);
+if(t&&POS[t]){e.preventDefault();E[t].h.focus()}
+}
+function relayout(){W=Cv.clientWidth||655;measure();PL=plan();render()}
+relayout();
+addEventListener('resize',()=>{if(Cv.clientWidth!==W)relayout()});
+if(window.ResizeObserver)new ResizeObserver(()=>{requestAnimationFrame(()=>{if(Cv.clientWidth!==W)relayout()})}).observe(Cv);
+if(document.fonts){document.fonts.ready.then(relayout);if(document.fonts.addEventListener)document.fonts.addEventListener('loadingdone',relayout)}
+})();
+</script>
+</main>
+</body>
+</html>

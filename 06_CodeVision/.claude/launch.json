@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "codevision",
+      "runtimeExecutable": "cmd.exe",
+      "runtimeArgs": ["/c", "C:\\Users\\User\\03_Project Alice\\06_CodeVision\\run.bat", "--no-browser", "--port", "8799"],
+      "port": 8799,
+      "url": "http://127.0.0.1:8799"
+    }
+  ]
+}

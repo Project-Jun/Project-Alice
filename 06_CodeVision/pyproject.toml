@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codevision"
+version = "0.1.0"
+description = "바이브 코딩으로 만든 프로젝트의 구조를 트리 도식으로 보여 주는 로컬 도구"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "tree-sitter>=0.25",
+  "tree-sitter-javascript>=0.25",
+  "tree-sitter-typescript>=0.23",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+codevision = "codevision.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+codevision = ["web/*", "demo/**/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

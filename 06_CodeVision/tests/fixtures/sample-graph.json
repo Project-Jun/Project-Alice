@@ -1,0 +1,409 @@
+{
+ "version": 1,
+ "source": {
+  "kind": "local",
+  "path": "C:\\Users\\me\\projects\\my-todo-app"
+ },
+ "name": "my-todo-app",
+ "root": ".",
+ "focus": "frontend/src/api.js",
+ "stats": {
+  "folders": 5,
+  "files": 12,
+  "entries": 2,
+  "orphans": 1,
+  "skipped": 0
+ },
+ "hidden": [
+  "node_modules",
+  ".venv"
+ ],
+ "areas": {
+  "ui": "화면 코드",
+  "sv": "서버 코드",
+  "ot": "문서·설정"
+ },
+ "stack": [
+  {
+   "area": "ui",
+   "label": "화면",
+   "tech": "React"
+  },
+  {
+   "area": "sv",
+   "label": "서버",
+   "tech": "FastAPI"
+  },
+  {
+   "area": "sv",
+   "label": "DB",
+   "tech": "SQLite"
+  }
+ ],
+ "ai": {
+  "provider": "none",
+  "available": false,
+  "message": "AI 설명이 아직 연결되지 않았어요."
+ },
+ "warnings": [],
+ "truncated": false,
+ "generated": 0,
+ "nodes": {
+  ".": {
+   "n": "my-todo-app",
+   "p": "my-todo-app/",
+   "t": "d",
+   "a": "ot",
+   "s": "할 일 관리 웹앱",
+   "d": "화면(frontend)과 서버(backend) 두 부분으로 나뉘어 있어요. 화면에서 버튼을 누르면 api.js가 서버에 요청을 보내고, 서버가 DB에 저장해요.",
+   "k": [
+    "frontend",
+    "backend",
+    "helpers_old.py",
+    "README.md"
+   ]
+  },
+  "frontend": {
+   "n": "frontend",
+   "p": "frontend/",
+   "t": "d",
+   "a": "ui",
+   "s": "사용자가 보는 화면 (React)",
+   "d": "브라우저에 뜨는 화면 코드예요. main.jsx에서 시작해서 App, TodoList, TodoItem 순서로 화면이 조립돼요.",
+   "k": [
+    "frontend/src",
+    "frontend/package.json"
+   ]
+  },
+  "frontend/src": {
+   "n": "src",
+   "p": "frontend/src/",
+   "t": "d",
+   "a": "ui",
+   "s": "화면 소스 코드",
+   "d": "실제 화면 코드가 모여 있어요. 서버와 주고받는 일은 api.js가 맡아요.",
+   "k": [
+    "frontend/src/components",
+    "frontend/src/api.js",
+    "frontend/src/App.jsx",
+    "frontend/src/main.jsx"
+   ]
+  },
+  "frontend/src/components": {
+   "n": "components",
+   "p": "frontend/src/components/",
+   "t": "d",
+   "a": "ui",
+   "s": "화면 부품 모음",
+   "d": "목록, 한 줄 항목처럼 여러 번 다시 쓰는 화면 조각이에요.",
+   "k": [
+    "frontend/src/components/TodoItem.jsx",
+    "frontend/src/components/TodoList.jsx"
+   ]
+  },
+  "frontend/src/components/TodoItem.jsx": {
+   "n": "TodoItem.jsx",
+   "p": "frontend/src/components/TodoItem.jsx",
+   "a": "ui",
+   "l": 33,
+   "s": "할 일 한 줄",
+   "d": "할 일 하나를 한 줄로 보여줘요. 체크하면 완료 표시, 휴지통을 누르면 삭제 요청을 보내요.",
+   "f": [
+    [
+     "TodoItem()",
+     "한 줄 그리기"
+    ],
+    [
+     "handleDelete()",
+     "삭제 버튼 동작"
+    ]
+   ],
+   "u": [
+    "frontend/src/api.js"
+   ],
+   "b": [
+    "frontend/src/components/TodoList.jsx"
+   ],
+   "t": "f"
+  },
+  "frontend/src/components/TodoList.jsx": {
+   "n": "TodoList.jsx",
+   "p": "frontend/src/components/TodoList.jsx",
+   "a": "ui",
+   "l": 41,
+   "s": "할 일 목록 표시",
+   "d": "화면이 처음 뜰 때 서버에서 목록을 받아 와서, 할 일마다 TodoItem을 하나씩 그려요.",
+   "f": [
+    [
+     "TodoList()",
+     "목록 화면 그리기"
+    ],
+    [
+     "useEffect()",
+     "처음 뜰 때 목록 불러오기"
+    ]
+   ],
+   "u": [
+    "frontend/src/api.js",
+    "frontend/src/components/TodoItem.jsx"
+   ],
+   "b": [
+    "frontend/src/App.jsx"
+   ],
+   "t": "f"
+  },
+  "frontend/src/api.js": {
+   "n": "api.js",
+   "p": "frontend/src/api.js",
+   "a": "ui",
+   "l": 34,
+   "s": "서버 요청 함수 모음",
+   "d": "화면과 서버를 잇는 다리예요. 목록 조회, 추가, 삭제 요청을 서버의 /todos 주소로 보내요.",
+   "f": [
+    [
+     "fetchTodos()",
+     "할 일 목록 가져오기"
+    ],
+    [
+     "addTodo(title)",
+     "새 할 일 저장하기"
+    ],
+    [
+     "deleteTodo(id)",
+     "할 일 지우기"
+    ]
+   ],
+   "u": [
+    "backend/routes/todos.py"
+   ],
+   "b": [
+    "frontend/src/components/TodoList.jsx",
+    "frontend/src/components/TodoItem.jsx"
+   ],
+   "h": [
+    "backend/routes/todos.py"
+   ],
+   "t": "f"
+  },
+  "frontend/src/App.jsx": {
+   "n": "App.jsx",
+   "p": "frontend/src/App.jsx",
+   "a": "ui",
+   "l": 27,
+   "s": "화면 전체 틀",
+   "d": "제목, 입력창, 할 일 목록을 배치하는 화면의 뼈대예요.",
+   "f": [
+    [
+     "App()",
+     "전체 레이아웃 그리기"
+    ]
+   ],
+   "u": [
+    "frontend/src/components/TodoList.jsx"
+   ],
+   "b": [
+    "frontend/src/main.jsx"
+   ],
+   "t": "f"
+  },
+  "frontend/src/main.jsx": {
+   "n": "main.jsx",
+   "p": "frontend/src/main.jsx",
+   "a": "ui",
+   "l": 9,
+   "e": 1,
+   "s": "화면 시작점",
+   "d": "브라우저가 가장 먼저 실행하는 파일이에요. App을 페이지에 붙이는 일만 해요.",
+   "f": [
+    [
+     "createRoot().render()",
+     "App을 화면에 붙이기"
+    ]
+   ],
+   "u": [
+    "frontend/src/App.jsx"
+   ],
+   "b": [],
+   "t": "f"
+  },
+  "frontend/package.json": {
+   "n": "package.json",
+   "p": "frontend/package.json",
+   "a": "ot",
+   "l": 22,
+   "i": "ti-file-settings",
+   "s": "라이브러리·실행 설정",
+   "d": "사용하는 라이브러리(React 등) 목록과 실행 명령(npm run dev)이 적혀 있어요.",
+   "f": [],
+   "u": [],
+   "b": [],
+   "t": "f"
+  },
+  "backend": {
+   "n": "backend",
+   "p": "backend/",
+   "t": "d",
+   "a": "sv",
+   "s": "데이터 처리 서버 (FastAPI)",
+   "d": "화면에서 온 요청을 받아 DB에 저장하거나 꺼내 줘요. main.py에서 시작해요.",
+   "k": [
+    "backend/routes",
+    "backend/database.py",
+    "backend/main.py",
+    "backend/models.py"
+   ]
+  },
+  "backend/routes": {
+   "n": "routes",
+   "p": "backend/routes/",
+   "t": "d",
+   "a": "sv",
+   "s": "주소별 요청 처리",
+   "d": "/todos 같은 주소로 요청이 오면 무엇을 할지 정해 둔 곳이에요.",
+   "k": [
+    "backend/routes/todos.py"
+   ]
+  },
+  "backend/routes/todos.py": {
+   "n": "todos.py",
+   "p": "backend/routes/todos.py",
+   "a": "sv",
+   "l": 58,
+   "s": "할 일 API",
+   "d": "/todos 주소로 온 요청을 처리해요. 목록 주기, 새로 저장하기, 지우기 세 가지 일을 해요.",
+   "f": [
+    [
+     "get_todos()",
+     "GET · 목록 조회"
+    ],
+    [
+     "create_todo()",
+     "POST · 새 할 일 저장"
+    ],
+    [
+     "delete_todo(id)",
+     "DELETE · 할 일 삭제"
+    ]
+   ],
+   "u": [
+    "backend/models.py",
+    "backend/database.py"
+   ],
+   "b": [
+    "backend/main.py",
+    "frontend/src/api.js"
+   ],
+   "h": [
+    "frontend/src/api.js"
+   ],
+   "t": "f"
+  },
+  "backend/database.py": {
+   "n": "database.py",
+   "p": "backend/database.py",
+   "a": "sv",
+   "l": 21,
+   "s": "DB 연결 준비",
+   "d": "SQLite 데이터베이스 파일(todo.db)에 연결하는 설정이에요.",
+   "f": [
+    [
+     "engine",
+     "DB 연결 만들기"
+    ],
+    [
+     "get_db()",
+     "요청마다 DB 연결 빌려주기"
+    ]
+   ],
+   "u": [],
+   "b": [
+    "backend/main.py",
+    "backend/routes/todos.py",
+    "backend/models.py"
+   ],
+   "t": "f"
+  },
+  "backend/main.py": {
+   "n": "main.py",
+   "p": "backend/main.py",
+   "a": "sv",
+   "l": 18,
+   "e": 1,
+   "s": "서버 시작점",
+   "d": "서버를 켜고 /todos 담당 코드를 등록해요. 서버를 실행하면 여기서부터 시작돼요.",
+   "f": [
+    [
+     "app = FastAPI()",
+     "서버 만들기"
+    ],
+    [
+     "include_router()",
+     "주소 담당 코드 등록"
+    ]
+   ],
+   "u": [
+    "backend/routes/todos.py",
+    "backend/database.py"
+   ],
+   "b": [],
+   "t": "f"
+  },
+  "backend/models.py": {
+   "n": "models.py",
+   "p": "backend/models.py",
+   "a": "sv",
+   "l": 15,
+   "s": "할 일 데이터 모양",
+   "d": "할 일 하나가 어떤 정보(번호, 제목, 완료 여부)를 갖는지 정해요. DB 표의 설계도예요.",
+   "f": [
+    [
+     "class Todo",
+     "id · title · done"
+    ]
+   ],
+   "u": [
+    "backend/database.py"
+   ],
+   "b": [
+    "backend/routes/todos.py"
+   ],
+   "t": "f"
+  },
+  "helpers_old.py": {
+   "n": "helpers_old.py",
+   "p": "helpers_old.py",
+   "a": "ot",
+   "l": 47,
+   "o": 1,
+   "i": "ti-file-alert",
+   "s": "사용되지 않는 파일",
+   "d": "어느 파일에서도 불러 쓰지 않아요. AI가 예전에 만들었다가 남겨 둔 버전일 가능성이 높아요.",
+   "f": [
+    [
+     "format_date()",
+     "날짜를 글자로 바꾸기"
+    ],
+    [
+     "old_save_todo()",
+     "예전 저장 방식"
+    ]
+   ],
+   "u": [],
+   "b": [],
+   "t": "f"
+  },
+  "README.md": {
+   "n": "README.md",
+   "p": "README.md",
+   "a": "ot",
+   "l": 30,
+   "i": "ti-file-text",
+   "s": "프로젝트 소개 문서",
+   "d": "프로젝트 설명과 실행 방법이 적혀 있어요.",
+   "f": [],
+   "u": [],
+   "b": [],
+   "t": "f"
+  }
+ }
+}
