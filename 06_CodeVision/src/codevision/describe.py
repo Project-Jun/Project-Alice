@@ -5,13 +5,17 @@ Wording is polite 해요체 that a non-developer can follow.
 """
 from __future__ import annotations
 
+import builtins
 import re
 
 from .model import FileFacts
 from .scan import ARCHIVE_EXTS, COMPILED_EXTS, DATABASE_EXTS, DOCUMENT_EXTS, FONT_EXTS, IMAGE_EXTS, MEDIA_EXTS
 
 # Canonical framework name -> display name, in stack-strip order.
-UI_FRAMEWORKS = {"react": "React", "vue": "Vue", "svelte": "Svelte", "next": "Next.js", "angular": "Angular"}
+UI_FRAMEWORKS = {"react": "React", "vue": "Vue", "svelte": "Svelte", "next": "Next.js", "nuxt": "Nuxt",
+                 "sveltekit": "SvelteKit", "angular": "Angular"}
+# Single-file components: the framework a .vue or .svelte file is written for.
+SFC_TECH = {".vue": "Vue", ".svelte": "Svelte"}
 SERVER_FRAMEWORKS = {
     "fastapi": "FastAPI", "flask": "Flask", "django": "Django", "express": "Express",
     "nestjs": "NestJS", "koa": "Koa", "fastify": "Fastify", "hono": "Hono",
@@ -525,22 +529,49 @@ def doc_title(text: str) -> str:
 
 # ---------------------------------------------------------------- functions
 
-def _symbol_rank(sym) -> int:
-    """0: the file's public face (exported, or no leading underscore); 1: a private class or a
-    documented private helper; 2: other private helpers."""
+# A class whose name ends so is for errors or warnings. The error-file role's fourth ending, "Exc",
+# is left out here: pytest's RaisesExc is no error class.
+_EXCEPTION_ENDS = ("Error", "Exception", "Warning")
+# Python's own exception and warning classes (OSError, KeyboardInterrupt, UserWarning, ...).
+_BUILTIN_EXCEPTIONS = frozenset(name for name, value in vars(builtins).items()
+                                if isinstance(value, type) and issubclass(value, BaseException))
+
+
+def _is_exception(sym, earlier: set[str]) -> bool:
+    """A class for errors or warnings: named so (SMTPDataError), or made from one of Python's own
+    (class SMTPException(OSError)), from one named so, or from one of `earlier`, the exception
+    classes the file defines before it (class SMTPSenderRefused(SMTPResponseException))."""
+    if sym.kind != "class" or not sym.name:
+        return False
+    return sym.name.endswith(_EXCEPTION_ENDS) or any(
+        base in earlier or base in _BUILTIN_EXCEPTIONS or base.endswith(_EXCEPTION_ENDS) for base in sym.bases)
+
+
+def _symbol_rank(sym, exception: bool = False) -> int:
+    """0: the file's public face (exported, or no leading underscore); 1: its public error and
+    warning classes, which many modules define first (smtplib's ten come before class SMTP);
+    2: a private class or a documented private helper; 3: other private helpers."""
     name = sym.name or ""
     if sym.exported or not name.startswith("_"):
-        return 0
-    return 1 if sym.kind in ("class", "component") or sym.doc else 2
+        return 1 if exception else 0
+    return 2 if sym.kind in ("class", "component") or sym.doc else 3
 
 
 def functions(facts: FileFacts | None, limit: int = 8) -> list[list[str]]:
-    """Up to `limit` symbols for the panel: public ones first, private helpers only in the room
-    left, each group in source order (install.py shows class InstallCommand, not 8 helpers)."""
+    """Up to `limit` symbols for the panel: public ones first, then the public error and warning
+    classes, private helpers only in the room left, each group in source order (install.py shows
+    class InstallCommand, not 8 helpers; smtplib.py shows class SMTP, not 8 of its errors)."""
     if facts is None:
         return []
-    ranked = sorted(enumerate(facts.symbols), key=lambda item: (_symbol_rank(item[1]), item[0]))
-    return [[sym.signature or sym.name, _doc_text(sym.doc) or sym.hint or ""] for _, sym in ranked[:limit]]
+    exceptions: set[str] = set()  # the file's exception classes so far, public or private
+    ranked = []
+    for i, sym in enumerate(facts.symbols):
+        exception = sym.kind == "class" and _is_exception(sym, exceptions)
+        if exception:
+            exceptions.add(sym.name)
+        ranked.append((_symbol_rank(sym, exception), i, sym))
+    ranked.sort()  # by rank, then source order (i): i is unique, so two symbols are never compared
+    return [[sym.signature or sym.name, _doc_text(sym.doc) or sym.hint or ""] for _, _, sym in ranked[:limit]]
 
 
 # ---------------------------------------------------------------- files
@@ -736,9 +767,9 @@ def _folder_role(rel: str, facts: FileFacts, area: str) -> tuple[str, str] | Non
 
 def _main_symbol(rel: str, facts: FileFacts):
     """The public class or function the file is about: the one named after the file (align.py ->
-    Align, install.py -> InstallCommand), else the only public one. An error class never is; one
-    error class beside the only public class is fine (PluginManager), a dozen warning classes around
-    one warn() function are not."""
+    Align, install.py -> InstallCommand), else the only public one. A class or function whose name
+    ends in Error, Exception, Warning or Exc never is; one error class beside the only public class
+    is fine (PluginManager), a dozen warning classes around one warn() function are not."""
     found = [sym for sym in facts.symbols if sym.kind in ("class", "function") and sym.name]
     shown = [sym for sym in found if sym.exported] or [sym for sym in found if not sym.name.startswith("_")]
     public = [sym for sym in shown if not sym.name.endswith(_ERROR_ENDS)]
@@ -795,6 +826,29 @@ _HOOK_NAME = re.compile(r"^use[A-Z]")  # useTodos.js: a React hook
 _HELPER_NAME = re.compile(r"util|helper")
 
 
+_KIT_DATA = re.compile(r"\+(?:page|layout)(?:@[^./]*)?(?:\.server)?\.[cm]?[jt]s")
+_KIT_HOOKS = re.compile(r"hooks\.(?:server|client)\.[cm]?[jt]s")
+
+
+def _component_role(rel: str, tech: str, parts: set[str]) -> tuple[str, str]:
+    """A Vue or Svelte file: a screen part named after the component (TodoItem.vue), or the app's
+    frame, a page, a layout or the error screen (App.vue, pages/, SvelteKit's +page.svelte)."""
+    stem = _stem(rel)
+    if stem.lower() == "index" and _folder_parts(rel):  # components/TodoItem/index.vue
+        stem = rel.split("/")[-2]
+    kind = stem[1:].split("@", 1)[0] if stem.startswith("+") else ""  # SvelteKit's +page, +layout, +error
+    made = f"{tech}로 만들었어요."  # the same words as for React components (화면 조각), with the framework
+    if stem.lower() == "app":
+        return "화면 전체 틀", _join("화면 조각들을 모아 전체 화면을 짜는 뼈대예요.", made)
+    if kind == "error" or (stem.lower() == "error" and _folder_parts(rel) in ([], ["app"])):  # Nuxt's error.vue
+        return "오류 화면", _join("문제가 생겼을 때 대신 보여 주는 화면이에요.", made)  # (app/ in Nuxt 4)
+    if kind == "layout" or (not kind and parts & {"layouts", "layout"}):
+        return "화면 배치 틀", _join("여러 페이지가 같이 쓰는 화면 배치를 정해요.", made)
+    if kind == "page" or (not kind and parts & {"pages", "screens", "views"}):
+        return "화면 페이지", _join("주소마다 보이는 화면 한 페이지예요.", made)
+    return f"{tech} 화면 조각", f"화면의 한 부분({stem})을 그리는 {tech} 코드예요."
+
+
 def _code_role(rel: str, facts: FileFacts, uses: int = 0, area: str = "ot") -> tuple[str, str]:
     stem = _stem(rel)
     low_stem = stem.lower()
@@ -804,8 +858,16 @@ def _code_role(rel: str, facts: FileFacts, uses: int = 0, area: str = "ot") -> t
         return "테스트 공통 준비", "테스트를 돌리기 전에 pytest가 먼저 읽는 공통 준비 코드예요."
     if is_test(rel):
         return "테스트 코드", "다른 코드가 제대로 동작하는지 자동으로 확인하는 코드예요."
+    tech = SFC_TECH.get(extension(rel))
+    if tech:
+        return _component_role(rel, tech, parts)
     if facts.http_routes:
         return "주소별 요청 처리", f"{_paths(facts.http_routes)} 주소로 오는 {_methods(facts.http_routes)}요청을 처리해요."
+    if _KIT_DATA.fullmatch(base_name(rel)):  # SvelteKit's +page.ts: the data of the page beside it
+        where = "서버에서 " if ".server." in base_name(rel) else ""
+        return "페이지 데이터 준비", f"화면에 보여 줄 데이터를 {where}미리 불러오는 코드예요."
+    if _KIT_HOOKS.fullmatch(base_name(rel)):  # SvelteKit's hooks.server.ts, not a React hook
+        return "요청 중간 처리", "요청이 올 때마다 본 처리 전에 먼저 거쳐 가는 코드예요."
     if low_stem == "__init__" and not facts.symbols:  # before the folder-name roles: utils/__init__.py
         if uses:
             return "패키지 입구 파일", "폴더 안의 모듈을 불러와서 바깥에서 쓰기 쉽게 모아 주는 파일이에요."
@@ -823,6 +885,8 @@ def _code_role(rel: str, facts: FileFacts, uses: int = 0, area: str = "ot") -> t
         part = f"화면의 한 부분({names})" if names else "화면의 한 부분"
         return "화면 조각", f"{part}을 그리는 코드예요."
     if _HOOK_NAME.match(stem):
+        if "composables" in parts or set(facts.frameworks) & {"vue", "nuxt", "svelte", "sveltekit"}:
+            return FILE_ROLES["composables"]  # a Vue composable (useTodos.ts): not a React hook
         return "화면 동작 도우미(훅)", "여러 화면 조각이 같이 쓰는 동작(React 훅)이에요."
     if facts.http_calls:
         summary = "서버 요청 함수 모음" if len(facts.symbols) >= 2 else "서버 요청 코드"
@@ -869,8 +933,8 @@ def _plain_role(rel: str, area: str, title: str, used_by: int = 0) -> tuple[str,
         if _stem(rel).lower() == "index":
             return "웹 페이지 뼈대(HTML)", "브라우저가 처음 여는 페이지예요. 화면 코드를 불러와 붙일 자리를 만들어요."
         return "웹 페이지(HTML)", "브라우저에 보이는 페이지의 뼈대예요."
-    if ext in (".vue", ".svelte"):
-        return "화면 조각", "화면의 한 부분을 그리는 코드예요."
+    if ext in SFC_TECH:  # not analyzed (no JavaScript analyzer)
+        return f"{SFC_TECH[ext]} 화면 조각", f"화면의 한 부분을 그리는 {SFC_TECH[ext]} 코드예요."
     if ext == ".sql":
         return "DB 명령(SQL)", "데이터베이스에 표를 만들거나 데이터를 넣는 명령이 적혀 있어요."
     if ext in (".csv", ".tsv"):
@@ -905,6 +969,7 @@ def describe_file(
     unreadable: bool = False,
     runnable: bool = False,
     by_path: bool = False,
+    loaded: str = "",
 ) -> tuple[str, str]:
     """Return (s, d) for one file.
 
@@ -912,6 +977,9 @@ def describe_file(
     (a demo `if __name__ == "__main__":` block), so it is not shown as a start point.
     `by_path`: a Python file whose name no import statement can spell (__pip-runner__.py),
     so it is run or loaded by its path.
+    `loaded`: how the file is used although no import names it, one Korean sentence ("Nuxt가
+    화면에 쓰인 이름을 보고 알아서 불러와요."). It follows the role, in place of "다른 파일과 직접
+    이어져 있지 않아요.". A start point says why it starts instead.
     """
     links = connections(uses, used_by)
     if orphan:
@@ -925,7 +993,8 @@ def describe_file(
         return "너무 커서 건너뛴 파일", _join("파일이 1MB보다 커서 내용을 분석하지 않았어요.", links)
     code = facts is not None and facts.language in CODE_LANGUAGES and not is_config(rel)
     marker = base_name(rel).lower() in ("__init__.py", "conftest.py")  # run by Python or pytest, not imported
-    if code and not links and not entry and not marker:
+    note = sentence(loaded) if loaded and loaded.strip() and not entry else ""
+    if code and not links and not entry and not marker and not note:
         links = ("파일 이름 때문에 import 문으로는 불러올 수 없어서, 다른 코드가 파일 경로로 불러오거나 "
                  "직접 실행하는 파일일 거예요." if by_path else "다른 파일과 직접 이어져 있지 않아요.")
 
@@ -948,8 +1017,8 @@ def describe_file(
         if not entry:
             role = ("자동으로 만든 코드", "도구가 자동으로 만든 파일이에요. 직접 고치면 다시 만들 때 덮어써질 수 있어요.")
     elif doc and (summary := short(doc)):
-        return summary, _join(sentence(doc), start, also, links, broken)
-    return role[0], _join(role[1], also, links, broken)
+        return summary, _join(sentence(doc), start, note, also, links, broken)
+    return role[0], _join(role[1], note, also, links, broken)
 
 
 # ---------------------------------------------------------------- folders and root

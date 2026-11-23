@@ -41,9 +41,29 @@
   }
  ],
  "ai": {
-  "provider": "none",
-  "available": false,
-  "message": "AI 설명이 아직 연결되지 않았어요."
+  "provider": "local",
+  "enabled": true,
+  "available": true,
+  "model": "qwen2.5:7b",
+  "models": [
+   {
+    "name": "qwen2.5:7b",
+    "size": 4683087332,
+    "params": "7.6B"
+   },
+   {
+    "name": "gemma3:4b",
+    "size": 3338801804,
+    "params": "4.3B"
+   }
+  ],
+  "recommended": [
+   "qwen2.5:7b",
+   "gemma3:4b"
+  ],
+  "ollama": "running",
+  "can_start": false,
+  "message": "이 컴퓨터의 AI(qwen2.5:7b)로 설명을 만들어요."
  },
  "warnings": [],
  "truncated": false,
@@ -124,7 +144,8 @@
    "b": [
     "frontend/src/components/TodoList.jsx"
    ],
-   "t": "f"
+   "t": "f",
+   "lang": "javascript"
   },
   "frontend/src/components/TodoList.jsx": {
    "n": "TodoList.jsx",
@@ -150,7 +171,8 @@
    "b": [
     "frontend/src/App.jsx"
    ],
-   "t": "f"
+   "t": "f",
+   "lang": "javascript"
   },
   "frontend/src/api.js": {
    "n": "api.js",
@@ -183,7 +205,26 @@
    "h": [
     "backend/routes/todos.py"
    ],
-   "t": "f"
+   "t": "f",
+   "lang": "javascript",
+   "x": {
+    "s": "서버와 주고받는 함수 모음",
+    "d": "화면이 서버에서 할 일 목록을 받아 오고, 새 할 일을 저장하고, 할 일을 지울 때 쓰는 함수가 모여 있어요. TodoList와 TodoItem이 이 파일을 불러 써요.",
+    "f": [
+     [
+      "fetchTodos()",
+      "서버에서 할 일 목록을 가져와요."
+     ],
+     [
+      "addTodo(title)",
+      "새 할 일 제목을 서버에 보내서 저장해요."
+     ],
+     [
+      "deleteTodo(id)",
+      "번호로 고른 할 일을 서버에서 지워요."
+     ]
+    ]
+   }
   },
   "frontend/src/App.jsx": {
    "n": "App.jsx",
@@ -204,7 +245,8 @@
    "b": [
     "frontend/src/main.jsx"
    ],
-   "t": "f"
+   "t": "f",
+   "lang": "javascript"
   },
   "frontend/src/main.jsx": {
    "n": "main.jsx",
@@ -224,7 +266,8 @@
     "frontend/src/App.jsx"
    ],
    "b": [],
-   "t": "f"
+   "t": "f",
+   "lang": "javascript"
   },
   "frontend/package.json": {
    "n": "package.json",
@@ -296,7 +339,8 @@
    "h": [
     "frontend/src/api.js"
    ],
-   "t": "f"
+   "t": "f",
+   "lang": "python"
   },
   "backend/database.py": {
    "n": "database.py",
@@ -321,7 +365,8 @@
     "backend/routes/todos.py",
     "backend/models.py"
    ],
-   "t": "f"
+   "t": "f",
+   "lang": "python"
   },
   "backend/main.py": {
    "n": "main.py",
@@ -346,7 +391,8 @@
     "backend/database.py"
    ],
    "b": [],
-   "t": "f"
+   "t": "f",
+   "lang": "python"
   },
   "backend/models.py": {
    "n": "models.py",
@@ -367,7 +413,8 @@
    "b": [
     "backend/routes/todos.py"
    ],
-   "t": "f"
+   "t": "f",
+   "lang": "python"
   },
   "helpers_old.py": {
    "n": "helpers_old.py",
@@ -390,7 +437,8 @@
    ],
    "u": [],
    "b": [],
-   "t": "f"
+   "t": "f",
+   "lang": "python"
   },
   "README.md": {
    "n": "README.md",

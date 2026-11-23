@@ -12,7 +12,7 @@
 --fill-accent:#378ADD;--on-accent:#ffffff;--fill-ghost-hover:rgba(31,30,29,.05);--fill-ghost-selected:rgba(31,30,29,.09);
 --radius:8px;--pad-sm:8px;--pad-md:12px;--pad-lg:16px;--pad-xl:24px;--gap-xs:4px;--gap-sm:8px;--gap-md:12px;--gap-lg:16px;--gap-xl:24px;
 --font-sans:"Segoe UI","Malgun Gothic",system-ui,sans-serif;--font-mono:Consolas,"Cascadia Mono",monospace;--font-voice:Georgia,"Batang",serif;
---page:#faf9f5}
+--page:#faf9f5;--shadow-pop:0 10px 30px rgba(31,30,29,.14),0 1px 3px rgba(31,30,29,.1);--backdrop:rgba(31,30,29,.4)}
 @media (prefers-color-scheme: dark){:root{
 --text-primary:#f2f0e8;--text-secondary:#c3c1b8;--text-muted:#8f8d86;--text-disabled:rgba(242,240,232,.35);
 --text-accent:#85B7EB;--text-danger:#F09595;--text-success:#97C459;--text-warning:#FAC775;--text-pro:#AFA9EC;
@@ -24,7 +24,7 @@
 --border:rgba(242,240,232,.13);--border-strong:rgba(242,240,232,.24);--border-stronger:rgba(242,240,232,.4);
 --border-accent:#378ADD;--border-danger:#E24B4A;--border-success:#639922;--border-warning:#BA7517;
 --fill-ghost-hover:rgba(242,240,232,.075);--fill-ghost-selected:rgba(242,240,232,.15);
---page:#262624}}
+--page:#262624;--shadow-pop:0 10px 30px rgba(0,0,0,.45),0 1px 3px rgba(0,0,0,.35);--backdrop:rgba(0,0,0,.55)}}
 
 /* page */
 html{-webkit-text-size-adjust:100%}
@@ -48,8 +48,9 @@ button.pri:disabled{background:transparent;color:var(--text-disabled);border-col
 .f-ui{background:#534AB7}.f-sv{background:#0F6E56}.f-ot{background:#5F5E5A}.f-o{background:#BA7517}
 /* Korean text wraps between words, not inside them ("써요." stays whole); a long unbroken string can still
    break anywhere. Paths and file names keep the normal rules (.st-fn, .src-p, .pp, .er-path, .chip ...). */
-.st-lead,.st-lab,.st-msg,.er-msg,noscript p,.cv .aim span,.cv .ttl-s,.cv .hid,.cv .wn span,.cv .stk,.cv .lg,
-.cv .pm,.cv .ps,.cv .pds,.cv .pl,.cv .none,.cv .fn span{word-break:keep-all;overflow-wrap:anywhere}
+.st-lead,.st-lab,.st-msg,.er-msg,noscript p,.cv .ttl-s,.cv .hid,.cv .wn span,.cv .stk,.cv .lg,
+.cv .pm,.cv .ps,.cv .pds,.cv .pl,.cv .none,.cv .fn span,.cv .pa,.cv .aip p,.cv .aip-l,.cv .aip-jt{word-break:keep-all;overflow-wrap:anywhere}
+.cv [hidden]{display:none!important}
 
 /* start and error screens */
 .st{max-width:560px;margin:32px auto 0;font-size:14px}
@@ -104,14 +105,62 @@ button.pri:disabled{background:transparent;color:var(--text-disabled);border-col
 .cv .src-p{overflow-wrap:anywhere}
 .cv .src-p>span{display:inline-block}
 .cv .src-p>span:first-child::before{content:"·";content:"·" / "";margin:0 6px 0 3px;-webkit-user-select:none;user-select:none}
-.cv .src-r{margin-left:auto;display:inline-flex;align-items:center;gap:8px}
+.cv .src-r{margin-left:auto;display:inline-flex;align-items:center;gap:8px;position:relative}
+/* The AI chip: grey while AI is off, blue while it works, amber while it is on but cannot work (Ollama off ...). */
 .cv button.ai{height:auto;border:0}
-.cv button.ai:hover,.cv button.ai[aria-expanded="true"]{background:var(--fill-ghost-selected)}
-.cv .aim{display:flex;align-items:baseline;justify-content:flex-end;gap:4px;margin:-2px 0 8px;font-size:12px;line-height:1.6;color:var(--text-secondary);text-align:right}
-.cv .aim[hidden]{display:none}
-.cv .aim .ti{flex:none;font-size:12px}
-.cv .aim span{min-width:0;overflow-wrap:anywhere}
+.cv button.ai.tc:hover,.cv button.ai.tc[aria-expanded="true"]{background:var(--fill-ghost-selected)}
+.cv button.ai.ta:hover,.cv button.ai.ta[aria-expanded="true"]{box-shadow:inset 0 0 0 1px var(--border-accent)}
+.cv button.ai.tw:hover,.cv button.ai.tw[aria-expanded="true"]{box-shadow:inset 0 0 0 1px var(--border-warning)}
 .st-name:focus,.cv .ttl h1:focus{outline:none}
+
+/* the AI panel (app.js aiCtl): a popover under the chip; along the bottom of the screen on phones (below) */
+.cv .aip{position:absolute;right:0;top:calc(100% + 8px);z-index:20;width:360px;max-width:calc(100vw - 32px);box-sizing:border-box;padding:12px 16px 16px;background:var(--surface-popover);color:var(--text-primary);border:0.5px solid var(--border-strong);border-radius:12px;box-shadow:var(--shadow-pop);font-size:13px;line-height:1.6;text-align:left}
+.cv .aip-hd{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.cv .aip h2{display:flex;align-items:center;gap:6px;margin:0;font-size:14px;line-height:1.5}
+.cv .aip h2 .ti{font-size:15px;color:var(--text-pro)}
+.cv .aip h2:focus{outline:none}
+.cv .aip-x{flex:none;width:32px;height:32px;margin-right:-8px;padding:0;border:0;font-size:20px;line-height:1;color:var(--text-secondary)}
+.cv .aip-x:hover{background:var(--fill-ghost-hover)}
+.cv .aip p{margin:0}
+.cv .aip-m{margin-top:2px;color:var(--text-secondary)}
+.cv .aip-help{margin-top:8px;padding:8px 10px;border-radius:var(--radius);background:var(--bg-neutral)}
+.cv .aip-st{margin-top:10px}
+.cv .aip button{display:inline-flex;align-items:center;gap:6px}
+.cv .aip-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;min-width:0}
+.cv .aip-l{min-width:0}
+.cv .aip select{flex:0 1 220px;min-width:0;height:32px;box-sizing:border-box;padding:0 8px;font-family:inherit;font-size:13px;color:var(--text-primary);background:var(--surface-1);border:0.5px solid var(--border-strong);border-radius:var(--radius)}
+.cv .aip select:focus-visible{outline:2px solid var(--border-accent);outline-offset:1px}
+.cv .aip select:disabled{color:var(--text-secondary);background:transparent;border-color:var(--border);opacity:1}
+.cv .aip-hint{margin-top:4px;font-size:12px;color:var(--text-muted)}
+.cv .aip-err{margin-top:10px;font-size:12px;color:var(--text-danger)}
+.cv .aip-all{margin-top:14px;padding-top:12px;border-top:0.5px solid var(--border)}
+.cv .aip-est{margin-bottom:8px;font-size:12px;color:var(--text-secondary)}
+.cv .aip-cft{margin-bottom:10px}
+.cv .aip-btns{display:flex;flex-wrap:wrap;gap:8px}
+.cv .aip-jt{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.cv .aip-jc{flex:none;color:var(--text-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.cv .aip-bar{height:6px;margin:6px 0 8px;border-radius:3px;background:var(--bg-neutral);overflow:hidden}
+.cv .aip-bar>span{display:block;width:0;height:100%;border-radius:3px;background:var(--fill-accent);transition:width .4s ease}
+.cv .aip-cur{font-family:var(--font-mono);font-size:12px;color:var(--text-secondary);word-break:normal!important;overflow-wrap:anywhere}
+.cv .aip-eta{margin-top:2px;font-size:12px;color:var(--text-muted)}
+.cv .aip-job>button{margin-top:10px}
+.cv .aip-end{margin-bottom:6px;font-size:12px;color:var(--text-secondary)}
+.cv .aip-end.done{color:var(--text-success)}
+.cv .aip-end.failed{color:var(--text-danger)}
+.cv .aip [aria-disabled="true"]{color:var(--text-disabled);border-color:var(--border);background:transparent;cursor:default}
+/* the on/off switch (role="switch") */
+.cv .sw{position:relative;flex:none;width:44px;height:24px;padding:0;border-radius:12px;border:0.5px solid var(--border-stronger);background:var(--bg-neutral)}
+.cv .sw:hover{border-color:var(--text-muted)}
+.cv .sw-k{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:var(--text-secondary);transition:transform .15s ease}
+.cv .sw[aria-checked="true"]{background:var(--fill-accent);border-color:var(--fill-accent)}
+.cv .sw[aria-checked="true"] .sw-k{transform:translateX(20px);background:#FFFFFF}
+.cv .aip .sw[aria-disabled="true"]{opacity:.6}
+@media (prefers-reduced-motion:reduce){.cv .sw-k,.cv .aip-bar>span{transition:none}}
+.cv .aib{display:none}
+@media (max-width:560px){
+.cv .aip{position:fixed;left:0;right:0;top:auto;bottom:0;z-index:31;width:auto;max-width:none;max-height:85vh;overflow-y:auto;overscroll-behavior:contain;border-width:0.5px 0 0;border-radius:16px 16px 0 0;padding:14px 16px calc(20px + env(safe-area-inset-bottom, 0px))}
+.cv .aib{display:block;position:fixed;left:0;top:0;right:0;bottom:0;z-index:30;background:var(--backdrop)}
+}
 .cv .ttl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .cv .ttl>.ti{font-size:20px;color:var(--text-secondary)}
 .cv .ttl h1{margin:0;font-size:15px;line-height:1.7;min-width:0;overflow-wrap:anywhere}
@@ -173,6 +222,20 @@ button.pri:disabled{background:transparent;color:var(--text-disabled);border-col
 .cv .pm{margin-left:auto;font-size:12px;color:var(--text-muted)}
 .cv .pp{font-family:var(--font-mono);font-size:12px;color:var(--text-muted);margin:4px 0 12px;overflow-wrap:anywhere}
 .cv .ps{font-size:14px;font-weight:500;margin-bottom:4px;overflow-wrap:anywhere}
+/* The AI line under the path (app.js aiCtl row): the "AI 설명" mark and its switch to the rule text, the
+   waiting line, or what went wrong with 다시 시도. */
+.cv .pa{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;margin:-4px 0 10px;min-width:0;font-size:12px;line-height:1.55;color:var(--text-secondary)}
+.cv .pa:focus{outline:none}
+.cv .pa>.ti{flex:none;align-self:flex-start;margin-top:2px;font-size:14px}
+.cv .pa-b{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;flex:1 1 0;min-width:0}
+.cv .pa-t{min-width:0}
+.cv .pa-n{flex-basis:100%;color:var(--text-muted)}
+.cv .pa.bad{color:var(--text-danger)}
+.cv .aix{background:var(--bg-tint-magenta);color:var(--text-tint-magenta)}
+.cv .lnk{height:auto;padding:0 2px;border:0;border-radius:4px;background:none;font-size:12px;line-height:1.55;color:var(--text-accent);text-decoration:underline;text-decoration-color:var(--border-accent);text-underline-offset:3px}
+.cv .lnk:hover{background:var(--fill-ghost-hover)}
+.cv .sbtn{height:28px;padding:0 10px;font-size:12px;display:inline-flex;align-items:center;gap:4px}
+.cv .sbtn .ti{font-size:13px}
 .cv .pds{font-size:13px;line-height:1.65;color:var(--text-secondary);overflow-wrap:anywhere}
 .cv .pl{font-size:12px;color:var(--text-muted);margin:0 0 6px}
 .cv .chips{display:flex;flex-wrap:wrap;gap:6px}

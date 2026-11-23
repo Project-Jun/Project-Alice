@@ -1,7 +1,7 @@
 """Provider-neutral interface and data classes for AI explanations.
 
-No AI service is chosen yet (local model or commercial LLM). A provider only
-has to implement ``Explainer``; caching and graph updates live elsewhere.
+The "local" provider (Ollama on this computer) is in ollama.py. A provider only
+has to implement ``Explainer``; caching, jobs and graph updates live elsewhere.
 """
 from __future__ import annotations
 
@@ -68,8 +68,37 @@ class Explanation:
         )
 
 
+class AIError(Exception):
+    """A failure the screen can show: a contract code, its HTTP status and one Korean message."""
+
+    STATUS = {
+        "off": 409, "not_running": 409, "no_model": 409, "busy": 409, "missing": 409,
+        "not_found": 404,
+        "not_code": 422, "secret": 422, "too_big": 422,
+        "timeout": 504,
+        "bad_answer": 502, "failed": 502,
+        "bad_request": 400,
+    }
+
+    def __init__(self, code: str, message: str, status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status or self.STATUS.get(code, 500)
+
+    def reply(self) -> dict:
+        """The JSON body: {"error": Korean, "code": ...} (plain {"error"} for a bad request)."""
+        if self.code == "bad_request":
+            return {"error": self.message}
+        return {"error": self.message, "code": self.code}
+
+
 class Explainer(ABC):
-    """One AI provider. ``name`` and ``model`` are part of the cache key."""
+    """One AI provider. ``name`` and ``model`` are part of the cache key.
+
+    explain_file() and explain_folder() return an Explanation, None to keep the
+    rule-based text, or raise AIError with a contract code.
+    """
 
     name: str = ""
     model: str = ""

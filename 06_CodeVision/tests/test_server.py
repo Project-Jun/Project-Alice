@@ -24,13 +24,20 @@ import pytest
 
 from codevision import __main__ as cli
 from codevision import server as cv_server
+from codevision.explain import prompts
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 INDEX = '<!doctype html><meta name="cv-token" content="{{CV_TOKEN}}"><title>코드비전</title>'
 APP_JS = "console.log('코드비전');"
 APP_CSS = "body { color: #534AB7; }"
 ICONS_CSS = ".ti-folder{--ti:url(\"data:image/svg+xml,%3Csvg%3E%3C/svg%3E\")}"
-NOT_CONNECTED = {"provider": "none", "available": False, "message": "AI 설명이 아직 연결되지 않았어요."}
+# No config file: local AI is off. conftest makes Ollama look missing (no program, nothing listening).
+AI_OFF = {"provider": "local", "enabled": False, "available": False, "model": "", "models": [],
+          "recommended": list(prompts.RECOMMENDED_MODELS), "ollama": "missing", "can_start": False,
+          "message": "AI 설명이 꺼져 있어요."}
+AI_ROUTES = [("GET", "/api/ai/status"), ("POST", "/api/ai/settings"), ("POST", "/api/ai/start"),
+             ("POST", "/api/ai/explain"), ("POST", "/api/ai/explain-all"), ("GET", "/api/ai/job?id=j1"),
+             ("POST", "/api/ai/job/cancel")]
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": cv_server.CSP,
@@ -282,10 +289,23 @@ def test_api_needs_the_token(app):
     assert app.json("GET", "/api/recent", token="wrong-token")[0] == 403
     assert app.json("GET", "/api/analyze?demo=1", token=False)[0] == 403
     assert app.json("POST", "/api/pick-folder", token=False)[0] == 403
-    assert app.json("POST", "/api/explain", token="wrong-token", body=b'{"id": "main.py"}')[0] == 403
+    body = json.dumps({"project": "demo", "node": "main.py"}).encode("utf-8")
+    for method, path in AI_ROUTES:
+        for token in (False, "wrong-token"):
+            status, data = app.json(method, path, token=token, body=body if method == "POST" else None)
+            assert status == 403 and "권한" in data["error"], (method, path, token)
     assert app.json("GET", "/api/nothing-here", token=False)[0] == 403
     assert app.json("GET", "/api/pick-folder", token=False)[0] == 403  # no hint about methods without the token
+    assert app.json("GET", "/api/ai/explain", token=False)[0] == 403
     assert app.json("GET", "/api/recent")[0] == 200
+    assert app.built == []
+
+
+def test_ai_routes_check_the_host_too(app):
+    port = app.httpd.port
+    for method, path in AI_ROUTES:  # no body: a foreign Host is refused before any body is read
+        status, data = app.json(method, path, host=f"evil.example:{port}")
+        assert status == 403 and "열 수 없어요" in data["error"], path
     assert app.built == []
 
 
@@ -344,7 +364,12 @@ def test_host_header_must_be_exactly_our_address_once(app):
 
 @pytest.mark.parametrize("method, path, allow", [
     ("GET", "/api/pick-folder", "POST"),
-    ("GET", "/api/explain", "POST"),
+    ("GET", "/api/ai/settings", "POST"),
+    ("GET", "/api/ai/start", "POST"),
+    ("GET", "/api/ai/explain", "POST"),
+    ("GET", "/api/ai/explain-all", "POST"),
+    ("POST", "/api/ai/job?id=j1", "GET"),
+    ("GET", "/api/ai/job/cancel", "POST"),
     ("POST", "/api/analyze?demo=1", "GET"),
     ("POST", "/api/recent", "GET"),
     ("POST", "/api/ai/status", "GET"),
@@ -408,22 +433,24 @@ def test_requests_http_server_refuses_get_korean_json(app):
 
 def test_post_bodies_are_limited(app, monkeypatch):
     monkeypatch.setattr(cv_server, "MAX_BODY", 64)
+    monkeypatch.setattr(cv_server, "pick_folder", lambda: None)
     ok = [("Host", app.host), ("X-CV-Token", app.httpd.token)]
 
-    assert app.send("POST", "/api/explain", ok + [("Content-Length", "64")], b"x" * 64)[0] == 200
-    assert app.send("POST", "/api/explain", ok)[0] == 200  # no body at all is fine too
-    for length in ("65", "00065", str(10 ** 12), "9" * 5000):  # refused from the header alone, no body sent
-        status, _, raw = app.send("POST", "/api/explain", ok + [("Content-Length", length)])
-        assert status == 413 and json.loads(raw)["error"] == "보낸 내용이 너무 커요."
+    assert app.send("POST", "/api/pick-folder", ok + [("Content-Length", "64")], b"x" * 64)[0] == 200
+    assert app.send("POST", "/api/pick-folder", ok)[0] == 200  # no body at all is fine too
+    for path in ("/api/pick-folder", "/api/ai/explain", "/api/ai/settings"):
+        for length in ("65", "00065", str(10 ** 12), "9" * 5000):  # refused from the header alone, no body sent
+            status, _, raw = app.send("POST", path, ok + [("Content-Length", length)])
+            assert status == 413 and json.loads(raw)["error"] == "보낸 내용이 너무 커요."
     for length in ("", "abc", "-1", "+5", "5_0", "1e3", "0x10", "6 4"):
-        status, _, raw = app.send("POST", "/api/explain", ok + [("Content-Length", length)])
+        status, _, raw = app.send("POST", "/api/ai/explain", ok + [("Content-Length", length)])
         assert status == 400 and json.loads(raw)["error"] == "요청 내용을 읽을 수 없어요.", length
-    status, _, raw = app.send("POST", "/api/explain", ok + [("Content-Length", "1"), ("Content-Length", "2")])
+    status, _, raw = app.send("POST", "/api/ai/explain", ok + [("Content-Length", "1"), ("Content-Length", "2")])
     assert status == 400
-    status, _, raw = app.send("POST", "/api/explain", ok + [("Transfer-Encoding", "chunked")])
+    status, _, raw = app.send("POST", "/api/ai/explain", ok + [("Transfer-Encoding", "chunked")])
     assert status == 411 and "길이" in json.loads(raw)["error"]
 
-    short = (f"POST /api/explain HTTP/1.1\r\nHost: {app.host}\r\nX-CV-Token: {app.httpd.token}\r\n"
+    short = (f"POST /api/ai/explain HTTP/1.1\r\nHost: {app.host}\r\nX-CV-Token: {app.httpd.token}\r\n"
              "Content-Length: 10\r\n\r\nabc").encode()
     status, _, body = parse_reply(raw_exchange(app.httpd.port, short, shut_write=True))
     assert status == 400 and json.loads(body)["error"] == "요청 내용을 다 받지 못했어요."
@@ -433,7 +460,7 @@ def test_a_client_that_stops_sending_is_dropped(app, monkeypatch, caplog):
     monkeypatch.setattr(cv_server.Handler, "timeout", 0.3)
     stalled_requests = [
         f"GET / HTTP/1.1\r\nHost: {app.host}\r\n",  # the headers never end
-        f"POST /api/explain HTTP/1.1\r\nHost: {app.host}\r\nContent-Length: 10\r\n\r\nabc",  # nor the body
+        f"POST /api/ai/explain HTTP/1.1\r\nHost: {app.host}\r\nContent-Length: 10\r\n\r\nabc",  # nor the body
     ]
     for data in stalled_requests:
         with socket.create_connection(("127.0.0.1", app.httpd.port), timeout=10) as stalled:
@@ -459,7 +486,8 @@ def test_analyze_demo(app):
     assert Path(app.built[-1]) == cv_server.DEMO_DIR
     assert data["source"] == {"kind": "demo", "path": ""}  # the screen says 예제 프로젝트, not our install folder
     assert data["nodes"]["main.py"]["s"] == "시작 파일"
-    assert data["ai"] == NOT_CONNECTED
+    assert data["ai"] == AI_OFF
+    assert "x" not in data["nodes"]["main.py"]
     assert app.json("GET", "/api/recent") == (200, {"items": []})  # the demo is not remembered
 
 
@@ -667,12 +695,15 @@ def test_every_reply_has_the_security_headers(app, monkeypatch):
         app.request("GET", "/nothing-here", token=False),
         app.request("GET", "/api/pick-folder"),
         app.request("GET", "/api/analyze"),
-        app.send("POST", "/api/explain", too_big),
+        app.send("POST", "/api/ai/explain", too_big),
         app.request("PUT", "/api/recent"),
+        app.request("GET", "/api/ai/status"),
+        app.request("POST", "/api/ai/start", body=b"{}"),  # conftest: no Ollama program -> 409 missing
+        app.request("GET", "/api/ai/job?id=nope"),
     ]
     monkeypatch.setattr(cv_server, "load_recent", lambda: 1 / 0)
     replies.append(app.request("GET", "/api/recent"))
-    assert [r[0] for r in replies] == [200, 200, 200, 200, 403, 403, 404, 405, 400, 413, 501, 500]
+    assert [r[0] for r in replies] == [200, 200, 200, 200, 403, 403, 404, 405, 400, 413, 501, 200, 409, 404, 500]
     for status, headers, body in replies:
         for name, value in SECURITY_HEADERS.items():
             assert headers[name] == value, (status, name)
@@ -702,11 +733,13 @@ def test_recent_ignores_a_broken_file(tmp_path, monkeypatch):
     assert [i["path"] for i in cv_server.add_recent(str(tmp_path))] == [str(tmp_path)]
 
 
-def test_ai_status_and_explain(app):
-    assert app.json("GET", "/api/ai/status") == (200, NOT_CONNECTED)
+def test_ai_status_and_the_old_explain_placeholder_is_gone(app):
+    assert app.json("GET", "/api/ai/status") == (200, AI_OFF)
     status, data = app.json("POST", "/api/explain", body=json.dumps({"id": "main.py"}).encode("utf-8"))
-    assert status == 200
-    assert data == {"status": "not_configured", "message": NOT_CONNECTED["message"]}
+    assert status == 404 and data == {"error": "찾는 주소가 없어요."}
+    status, data = app.json("POST", "/api/ai/explain", body=json.dumps({"project": "demo", "node": "main.py"}).encode())
+    assert status == 409 and data == {"error": "AI 설명이 꺼져 있어요. 먼저 AI 설명을 켜 주세요.", "code": "off"}
+    assert app.built == []  # with AI off nothing is analyzed for it
 
 
 def test_pick_folder_endpoint(app, monkeypatch):

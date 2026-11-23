@@ -16,13 +16,27 @@ AREAS = ("ui", "sv", "ot")
 
 @dataclass
 class ImportRef:
-    """One import, require or re-export, as written in the source."""
+    """One import, require or re-export, as written in the source.
 
-    spec: str  # raw specifier: "./api", "react", "routes.todos"; "" for `from . import x`
+    A module whose name is only partly written in the code is a pattern (see is_pattern()):
+    `*` stands for the part only known at run time, and the import points to every project file
+    that matches. import(`./locales/${lang}.json`) -> "./locales/*.json",
+    import_module(f"pkg.plugins.{name}") -> "pkg.plugins.*". A "glob" import is one the code
+    writes as a pattern itself: import.meta.glob("./pages/*.vue"), whose `names` hold the other
+    patterns of the call ("!./pages/Draft.vue" leaves files out), and require.context("./dir",
+    true, /\\.js$/) -> "./dir/**" with the regular expression in `names` ("/\\.js$/").
+    """
+
+    spec: str  # raw specifier: "./api", "react", "routes.todos"; "" for `from . import x`; a pattern
     names: list[str] = field(default_factory=list)  # imported names, if any
-    kind: str = "import"  # import | from | require | dynamic | reexport | side-effect
+    kind: str = "import"  # import | from | require | dynamic | reexport | side-effect | glob
     level: int = 0  # Python relative-import level (number of leading dots)
     line: int = 0
+
+
+def is_pattern(imp: ImportRef) -> bool:
+    """An import that names its modules by a pattern (see ImportRef): it may point to many files."""
+    return imp.kind == "glob" or "*" in (imp.spec or "")
 
 
 @dataclass
@@ -36,6 +50,10 @@ class Symbol:
     hint: str = ""  # short Korean hint from heuristics, e.g. "GET · /todos"
     line: int = 0
     exported: bool = False
+    # A class's bases as written, the last part of each name: class SMTPSenderRefused(SMTPResponseException)
+    # -> ("SMTPResponseException",), class Timeout(errors.Error) -> ("Error",), and in JavaScript what it
+    # extends: class NotFound extends errors.HttpError -> ("HttpError",).
+    bases: tuple[str, ...] = ()
 
 
 @dataclass
@@ -59,6 +77,12 @@ class HttpRoute:
     # the place of: the own url_prefix of the file's blueprint the route answers under
     # (Blueprint(url_prefix="/todos")), normalized; "" if none.
     base: str = ""
+    # The router of this file the route answers under, by its variable: `todos_router` for
+    # @todos_router.get(...), `router` for router.get(...), a Fastify plugin function. A router that
+    # this file mounts on another of its routers answers under that one, so it is the outermost
+    # router of the file. A mount in another file that names one router (include_router(
+    # routes.todos_router)) moves only that router's routes. "" when not known (file-path routes).
+    router: str = ""
 
 
 @dataclass
@@ -75,7 +99,16 @@ class HttpMount:
     own prefix is `base`: it goes in front of `prefix`. When this file is mounted in turn
     with a Flask url_prefix, that takes the place of `base_own`, the start of `base` that
     is the own url_prefix of the outermost blueprint (root_bp in root_bp -> api_bp -> todos_bp).
-    Only the Python analyzer fills `base`, `replace` and `base_own`; JavaScript mounts keep the defaults.
+    Only the Python analyzer fills `replace` and `base_own`; the JavaScript analyzer fills `base` only
+    (JavaScript has no Flask-style url_prefix, so `replace` stays False).
+
+    A mount that names one router of the target module (`router`: include_router(
+    routes.todos_router), app.use("/todos", todos) with import { todos } from "./routes") moves only
+    the routes of that router (HttpRoute.router); one that takes the whole module, or names something
+    the graph does not know as a router there, moves every route of the file. `owner` is the router
+    of this file the target hangs under, so that a mount of this file in turn reaches it only through
+    that router. A mount with no prefix on the app is recorded too: alone it moves nothing, but next
+    to a mount of the same router under a prefix (in any file) the paths as written stay an address.
     """
 
     prefix: str  # raw prefix text, "${}" for unknown parts; normalized when it is applied
@@ -86,6 +119,113 @@ class HttpMount:
     # `base`) instead of going in front of it. FastAPI and Express put prefixes in front.
     replace: bool = False
     base_own: str = ""  # raw start of `base` that a Flask url_prefix mounting this file takes the place of
+    # The mounted router's name in the module `target` points to: an exported name in JavaScript
+    # ("todos", "default" for a default import or a require()), the names written after the import in
+    # Python ("todos_router", "todos.router": the graph takes the last one that is a router of that
+    # file). "" for the whole module.
+    router: str = ""
+    owner: str = ""  # the router of this file the target is mounted on (its routes' HttpRoute.router)
+
+
+@dataclass
+class HttpHelper:
+    """A request helper that other files of the project call with the address they want.
+
+    A function that requests the path it is given, after a base address of its own: export const api
+    = (path, opts) => fetch(BASE + path, opts) is HttpHelper("api", BASE, url_at=0, method="ANY",
+    options_at=1). Or an HTTP client made with a base address, whose methods take the path first:
+    export const http = axios.create({ baseURL: "/api" }) is HttpHelper("http", "/api", client=True),
+    and http.get("/todos") in another file asks for GET /api/todos. See helper_request().
+    """
+
+    name: str  # the variable holding it ("api"; "api.get" for a function in an object); FileFacts.exports says how others import it
+    base: str = ""  # raw address text in front of the path: "/api", "http://localhost:8000", "${}" (only known at run time)
+    url_at: int = 0  # the argument that is the path
+    method: str = "GET"  # the method it sends, when no argument chooses it
+    method_at: int | None = None  # the argument that names the method: request(url, method)
+    method_default: str = ""  # that parameter's written default (request(url, method = "GET")), "" if none
+    options_at: int | None = None  # the argument holding fetch()'s options: api(path, { method: "POST" })
+    client: bool = False  # an HTTP client (axios.create): its get/post/put/patch/delete methods take the path
+    line: int = 0
+
+
+@dataclass
+class HelperCall:
+    """A call of a request helper or HTTP client that this file imports from another project file:
+    api("/todos", { method: "POST" }), http.get("/todos"), api.request("/todos") through
+    import * as api. The graph finds the helper (HttpHelper) through the import and the file's
+    exports, and turns the call into an HttpCall of this file at the address the helper builds."""
+
+    target: ImportRef  # the import the helper came in with
+    name: str  # the imported name in that module: "api", "default" (default import, require()), "*" (import * as x)
+    member: str = ""  # the method called on it: "get" in http.get("/todos"); "" for a plain call
+    args: list[str | None] = field(default_factory=list)  # each argument as address text ("${}" for unknown parts), None if not one
+    options: list[str | None] = field(default_factory=list)  # the method each options-object argument sets ("GET" if none, "ANY" unknown); None for others
+    line: int = 0
+    # What this file made of the call on its own (http.get("/todos") with no base address): the graph
+    # puts the full address in its place when it finds the helper, and leaves it when it does not.
+    guess: HttpCall | None = None
+    symbols: list[str] = field(default_factory=list)  # functions of this file whose request hint is this call
+
+
+@dataclass
+class ExportName:
+    """A name this file exports that the graph follows from other files: a router another file mounts,
+    a request helper another file calls. Either a variable of this file (`local`), or a name passed on
+    from another module (`source`): export { api } from "./api", export * from "./api" (name "*"),
+    module.exports = { todos: require("./todos") }, import { api } from "./api"; export { api }."""
+
+    name: str  # the name others import: "api", "todos", "default"; "*" passes every name of `source` on
+    local: str = ""  # the variable of this file it stands for ("router" in export { router as todos })
+    source: ImportRef | None = None  # the module a passed-on name comes from
+    original: str = ""  # its name in `source`: "default" in export { default as api } from "./api"; "*" the module itself
+
+
+_METHOD_WORDS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+_ABSOLUTE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+
+def helper_request(helper: HttpHelper, args: list, options: list, member: str = "") -> tuple[str, str] | None:
+    """(method, raw address) of one call of a request helper, or None when the call gives no address.
+
+    `args` holds each argument as address text, `options` what each options-object argument sets
+    (see HelperCall). A function helper puts the path argument after its base, and takes the method
+    from its method argument (or that parameter's default when the call leaves it out), from the
+    options argument (fetch's GET when there is none), or else from a method word among the other
+    arguments. A client's `member` is the method (http.post("/todos", body)), and its base goes in
+    front of a relative path the way axios joins them.
+    """
+    if helper.client:
+        method = member.upper()
+        raw = args[0] if args else None
+        if method not in _METHOD_WORDS or raw is None:
+            return None
+        if not _ABSOLUTE.match(raw) and not raw.startswith("${"):
+            raw = helper.base.rstrip("/") + "/" + raw.lstrip("/")
+        return method, raw
+    if member:
+        return None
+    at = helper.url_at
+    part = args[at] if at < len(args) else None
+    if part is None:
+        return None
+    method = helper.method
+    if helper.method_at is not None:
+        if helper.method_at < len(args):
+            word = (args[helper.method_at] or "").strip().upper()
+            method = word if word in _METHOD_WORDS else "ANY"
+        else:
+            method = helper.method_default or "ANY"
+    elif helper.options_at is not None:
+        method = (options[helper.options_at] if helper.options_at < len(options) else None) or (
+            "GET" if helper.options_at >= len(args) else "ANY")
+    if method == "ANY":  # a method word among the other arguments: send("/todos", "POST")
+        for i, arg in enumerate(args):
+            word = (arg or "").strip().upper() if i != at else ""
+            if word in _METHOD_WORDS:
+                method = word
+                break
+    return method, helper.base + part
 
 
 @dataclass
@@ -100,6 +240,14 @@ class FileFacts:
     http_calls: list[HttpCall] = field(default_factory=list)
     http_routes: list[HttpRoute] = field(default_factory=list)
     http_mounts: list[HttpMount] = field(default_factory=list)  # routers mounted here under a prefix
+    http_helpers: list[HttpHelper] = field(default_factory=list)  # request helpers other files can call
+    helper_calls: list[HelperCall] = field(default_factory=list)  # calls of request helpers imported from project files
+    exports: list[ExportName] = field(default_factory=list)  # exported routers, helpers and plugins, and names passed on
+    # Routes and mounts made on the first parameter of a Fastify plugin function the file exports when
+    # the file does not import a server framework (module.exports = async function (fastify) {
+    # fastify.get(...) }): the graph counts them only when the project uses Fastify.
+    plugin_routes: list[HttpRoute] = field(default_factory=list)
+    plugin_mounts: list[HttpMount] = field(default_factory=list)
     frameworks: set[str] = field(default_factory=set)  # canonical lowercase names, see architecture.md
     is_entry: bool = False  # file-local evidence that execution starts here
     entry_reason: str = ""  # Korean, e.g. "서버를 만드는 파일"

@@ -65,6 +65,26 @@ class ExplanationCache:
         except (ValueError, AttributeError):
             return None
 
+    def get_many(self, provider: str, model: str, prompt_version: str, shas, kind: str = "file") -> dict:
+        """{sha: Explanation} for the given SHAs that are in the cache (one query per 500 SHAs)."""
+        wanted = list(dict.fromkeys(shas))
+        found: dict[str, Explanation] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            with self._lock:
+                rows = self._db().execute(
+                    "SELECT sha, body FROM explanations"
+                    f" WHERE provider = ? AND model = ? AND prompt_version = ? AND kind = ? AND sha IN ({marks})",
+                    (provider, model, prompt_version, kind, *chunk),
+                ).fetchall()
+            for sha, body in rows:
+                try:
+                    found[sha] = Explanation.from_dict(json.loads(body))
+                except (ValueError, AttributeError):
+                    continue
+        return found
+
     def put(self, provider: str, model: str, prompt_version: str, sha: str, explanation: Explanation,
             kind: str = "file") -> None:
         body = json.dumps(explanation.to_dict(), ensure_ascii=False)

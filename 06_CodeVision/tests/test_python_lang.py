@@ -452,6 +452,21 @@ def test_symbols_signatures_and_data_shapes():
     assert facts.module_doc == "모델 모음이에요."
     assert facts.is_entry and facts.entry_reason == "직접 실행하는 파일"
     assert facts.frameworks == {"django", "sqlalchemy"}
+    # the bases, by the last part of each name (describe lists error classes after the rest)
+    assert [s.bases for s in facts.symbols] == [("Model",), ("BaseModel",), ("SQLModel",), (), (), ()]
+
+
+def test_class_bases_are_recorded_as_written():
+    facts = py.analyze("mail.py", "import errors\n"
+                       "class MailError(OSError): pass\n"
+                       "class Refused(errors.SendError, Mixin): pass\n"
+                       "class Box(Generic[T]): pass\n"
+                       "class Row(namedtuple('Row', 'a b'), metaclass=Meta): pass\n"
+                       "class Plain: pass\n"
+                       "def send(): pass\n")
+    assert [(s.name, s.bases) for s in facts.symbols] == [
+        ("MailError", ("OSError",)), ("Refused", ("SendError", "Mixin")), ("Box", ("Generic",)), ("Row", ()),
+        ("Plain", ()), ("send", ())]
 
 
 def test_module_doc_from_leading_comment():
@@ -890,8 +905,9 @@ def test_routers_mounted_with_a_prefix_are_recorded():
     )
     mounts = [(m.prefix, m.target.spec, m.target.names, m.target.kind, m.target.level)
               for m in py.analyze("main.py", source).http_mounts]
-    assert mounts == [  # include_router without a prefix changes nothing, so it is not a mount
+    assert mounts == [  # include_router without a prefix moves nothing alone, but another file may mount it too
         ("/api/todos", "routes", ["todos"], "from", 0),
+        ("", "routes", ["users"], "from", 0),
         ("/v1", "api.v1", [], "import", 0),
         ("/api/v2", "api.v2", [], "import", 0),
         ("/admin", "admin", ["router"], "from", 1),
@@ -926,9 +942,10 @@ def test_flask_url_prefix_takes_the_place_of_the_blueprints_own():
     ]
     assert {s.name: s.hint for s in facts.symbols} == {
         "get_todo": "GET · /api/todos/<int:todo_id>", "list_items": "GET · /v1/items"}
-    # users_bp of views/users.py: its own url_prefix gives way to /users, under api, which answers at /v1
+    # users_bp of views/users.py: its own url_prefix gives way to /users, under api, which answers at /v1;
+    # admin_bp keeps its own (url_prefix=None), which moves nothing unless another file mounts it too
     assert [(m.prefix, m.target.spec, m.base, m.replace) for m in facts.http_mounts] == [
-        ("/users", "views.users", "/v1", True)]
+        ("/users", "views.users", "/v1", True), ("", "views.admin", "", False)]
 
     routes = py.analyze("views/users.py", "from flask import Blueprint\nusers_bp = Blueprint('users', __name__, "
                         "url_prefix='/people')\n\n@users_bp.get('/<int:user_id>')\ndef get_user(user_id):\n    pass\n")
@@ -959,11 +976,13 @@ def test_fastapi_prefixes_are_joined():
 
 def test_a_mount_without_a_prefix_counts_next_to_another_one():
     # on the app as it is, a router answers at the paths as written: alone that changes nothing, but
-    # next to a mount under /v1 it is the second address
+    # next to a mount under /v1 it is the second address. users.router alone is recorded too, since
+    # another file may mount the same router under a prefix (the graph pairs them)
     source = ("from fastapi import FastAPI\nfrom routes.todos import router\nfrom routes import users\napp = FastAPI()\n"
               "app.include_router(router, prefix='/v1')\napp.include_router(router)\napp.include_router(users.router)\n")
     mounts = [(m.prefix, m.target.spec, m.target.names, m.replace) for m in py.analyze("main.py", source).http_mounts]
-    assert mounts == [("/v1", "routes.todos", ["router"], False), ("", "routes.todos", ["router"], False)]
+    assert mounts == [("/v1", "routes.todos", ["router"], False), ("", "routes.todos", ["router"], False),
+                      ("", "routes", ["users"], False)]
 
     local = py.analyze("main.py", "from fastapi import APIRouter, FastAPI\napp = FastAPI()\nrouter = APIRouter(prefix='/todos')\n\n"
                                   "@router.get('/')\ndef index():\n    return []\n\n"
@@ -973,6 +992,29 @@ def test_a_mount_without_a_prefix_counts_next_to_another_one():
     alone = py.analyze("main.py", "from fastapi import APIRouter, FastAPI\napp = FastAPI()\nrouter = APIRouter(prefix='/todos')\n\n"
                                   "@router.get('/')\ndef index():\n    return []\n\napp.include_router(router)\n")
     assert [(r.path, r.base) for r in alone.http_routes] == [("/todos", "/todos")]  # unchanged: its own prefix stays
+
+
+def test_mounts_name_the_router_they_take():
+    # 2026-11-21: a mount says which router of the imported module it takes, and which router of this
+    # file it hangs under, so that another file's mount moves only that router's routes
+    source = (
+        "from fastapi import APIRouter, FastAPI\nfrom routes import todos_router, users as people\nimport api.v1\n"
+        "import routes2\nfrom views import admin\napp = FastAPI()\nouter = APIRouter(prefix='/outer')\n"
+        "app.include_router(todos_router, prefix='/todos')\napp.include_router(people.router)\n"
+        "app.include_router(api.v1.router, prefix='/v1')\napp.include_router(routes2.items_router, prefix='/items')\n"
+        "outer.include_router(admin.panel)\napp.include_router(outer)\n")
+    assert [(m.prefix, m.target.spec, m.router, m.owner, m.base) for m in py.analyze("main.py", source).http_mounts] == [
+        ("/todos", "routes", "todos_router", "app", ""),
+        ("", "routes", "users.router", "app", ""),  # the submodule users' router, or a router named users
+        ("/v1", "api.v1", "router", "app", ""),
+        ("/items", "routes2", "items_router", "app", ""),
+        ("", "views", "admin.panel", "outer", "/outer"),
+    ]
+    routes = py.analyze("routes.py", "from fastapi import APIRouter\ntodos_router = APIRouter()\n"
+                        "api = APIRouter(prefix='/api')\n\n@todos_router.get('/list')\ndef todos():\n    return []\n\n"
+                        "@api.get('/ping')\ndef ping():\n    return 1\n\napi.include_router(todos_router, prefix='/t')\n")
+    # todos_router answers under api in this file: a mount of api in another file reaches it
+    assert [(r.path, r.router) for r in routes.http_routes] == [("/api/t/list", "api"), ("/api/ping", "api")]
 
 
 def test_router_mounted_in_its_own_file_moves_its_routes():
@@ -1011,11 +1053,112 @@ def test_module_names_built_at_run_time_point_to_the_matching_files():
     # rich loads its unicode tables (unicode15-0-0.py, ...) by a name made at run time
     source = ("from importlib import import_module\n\ndef load(version):\n"
               "    name = f'.unicode{version}'\n    return import_module(name, __package__)\n\n"
-              "def other(kind):\n    return import_module('pkg.lexers.' + kind)\n")  # no fixed name part: nothing
+              "def other(kind):\n    return import_module('pkg.lexers.' + kind)\n")  # the package is written
     facts = py.analyze("pkg/tables/__init__.py", source)
-    (table,) = [i for i in facts.imports if i.kind == "dynamic"]
-    assert (table.spec, table.names, table.level) == ("", ["unicode*"], 1)
+    table, lexers = [i for i in facts.imports if i.kind == "dynamic"]
+    assert (table.spec, table.names, table.level) == ("unicode*", [], 1)
+    assert (lexers.spec, lexers.names, lexers.level, lexers.line) == ("pkg.lexers.*", [], 0, 8)
     index = fake_index("pkg/__init__.py", "pkg/tables/__init__.py", "pkg/tables/unicode15-0-0.py",
-                       "pkg/tables/unicode9-0-0.py", "pkg/tables/_versions.py", "pkg/tables/unicode_extra/__init__.py")
+                       "pkg/tables/unicode9-0-0.py", "pkg/tables/_versions.py", "pkg/tables/unicode_extra/__init__.py",
+                       "pkg/lexers/__init__.py", "pkg/lexers/python.py", "pkg/lexers/web/__init__.py",
+                       "pkg/lexers/web/css.py", "pkg/lexers/notes.txt")
     assert py.resolve(table, "pkg/tables/__init__.py", index) == [
         "pkg/tables/unicode15-0-0.py", "pkg/tables/unicode9-0-0.py", "pkg/tables/unicode_extra/__init__.py"]
+    # every module of pkg.lexers: modules and packages, not the package itself or what is below them
+    assert py.resolve(lexers, "pkg/tables/__init__.py", index) == [
+        "pkg/lexers/python.py", "pkg/lexers/web/__init__.py"]
+
+
+# ---------------------------------------------------------------- module names built at run time (2026-11-20)
+
+@pytest.mark.parametrize("source, spec, level", [
+    ('import importlib\nm = importlib.import_module(f"pkg.plugins.{name}")\n', "pkg.plugins.*", 0),
+    ('import importlib\nm = importlib.import_module("pkg.plugins." + name)\n', "pkg.plugins.*", 0),
+    ('import importlib\nm = importlib.import_module("pkg.plugins.%s" % name)\n', "pkg.plugins.*", 0),
+    ('import importlib\nm = importlib.import_module("pkg.plugins.{}".format(name))\n', "pkg.plugins.*", 0),
+    ('m = __import__("pkg.plugins." + name, fromlist=["setup"])\n', "pkg.plugins.*", 0),
+    ('name = "pkg.plugins." + kind\nm = __import__(name)\n', "pkg.plugins.*", 0),  # through a variable
+    ('import importlib\nm = importlib.import_module(f"pkg.{kind}.handler")\n', "pkg.*.handler", 0),
+    ('import importlib\nm = importlib.import_module(f"pkg.plugins.mod_{name}")\n', "pkg.plugins.mod_*", 0),
+    # relative to this package: with package=__package__ (or __name__), or the package's name first
+    ('import importlib\nm = importlib.import_module(".plugins." + name, package=__package__)\n', "plugins.*", 1),
+    ('import importlib\nm = importlib.import_module(f"..plugins.{name}", __package__)\n', "plugins.*", 2),
+    ('import importlib\nm = importlib.import_module(f".unicode{v}", package=__name__)\n', "unicode*", 1),
+    ('import importlib\nm = importlib.import_module(f"{__package__}.plugins.{name}")\n', "plugins.*", 1),
+    ('import importlib\nm = importlib.import_module(__name__ + ".plugins." + name)\n', "plugins.*", 1),
+])
+def test_module_names_built_with_a_written_start_are_patterns(source, spec, level):
+    facts = py.analyze("pkg/loader/__init__.py", source)
+    (imp,) = [i for i in facts.imports if i.kind == "dynamic" and "*" in i.spec]
+    assert (imp.spec, imp.names, imp.level, imp.line) == (spec, [], level, source.count("\n"))
+
+
+@pytest.mark.parametrize("rel, call", [
+    ("pkg/loader.py", "importlib.import_module(name)"),  # nothing written
+    ("pkg/loader.py", 'importlib.import_module(f"{name}.plugins")'),  # no package written
+    ("pkg/loader.py", 'importlib.import_module(config["module"])'),
+    ("pkg/loader.py", 'importlib.import_module("." + name, package="other")'),
+    ("pkg/loader.py", 'importlib.import_module(f"{__package__}{name}")'),
+    ("pkg/loader.py", 'importlib.import_module(f"{__name__}.{name}")'),  # loader.py is no package
+    ("pkg/loader.py", 'importlib.import_module(f"pkg.{a}-{b}")'),  # not a module name
+    # only the package written: any of its modules, like import(`./${name}`) (idlelib's editor.py)
+    ("pkg/loader.py", 'importlib.import_module("." + fname, package=__package__)'),
+    ("pkg/__init__.py", 'importlib.import_module(f"{__package__}.{name}")'),
+])
+def test_module_names_with_no_written_package_stay_unknown(rel, call):
+    source = f"import importlib\nm = {call}\nknown = importlib.import_module(f'pkg.known.{{kind}}')\n"
+    # only the name whose package is written, on the line after
+    assert [(i.spec, i.line) for i in py.analyze(rel, source).imports if i.kind == "dynamic"] == [("pkg.known.*", 3)]
+
+
+def test_module_name_patterns_point_to_the_matching_modules():
+    index = fake_index(
+        "pkg/__init__.py", "pkg/loader/__init__.py", "pkg/loader/one.py", "pkg/loader/two.py", "pkg/plugins/__main__.py",
+        "pkg/plugins/__init__.py", "pkg/plugins/a.py", "pkg/plugins/b/__init__.py", "pkg/plugins/b/extra.py",
+        "pkg/plugins/c.txt", "pkg/plugins/d.pyi", "pkg/x/handler.py", "pkg/y/__init__.py", "pkg/y/handler.py",
+        "pkg/z/__init__.py", "outside.py",
+    )
+
+    def hits(spec, level=0, importer="pkg/loader/__init__.py"):
+        return py.resolve(ImportRef(spec, [], "dynamic", level), importer, index)
+
+    assert hits("pkg.plugins.*") == ["pkg/plugins/a.py", "pkg/plugins/b/__init__.py"]
+    assert hits("pkg.*.handler") == ["pkg/x/handler.py", "pkg/y/handler.py"]  # x/ has no __init__.py
+    assert hits("*", 1) == ["pkg/loader/one.py", "pkg/loader/two.py"]  # not the importer itself
+    assert hits("plugins.*", 2) == ["pkg/plugins/a.py", "pkg/plugins/b/__init__.py"]
+    assert hits("*", 2, "pkg/__init__.py") == ["outside.py"]  # up to the project root (pkg itself is the importer)
+    assert hits("*", 3, "pkg/__init__.py") == [] and hits("missing.*") == [] and hits("pkg.loader.one.*") == []
+    # found from the importer's folders like any absolute import: the analyzed folder is the pip package
+    pip = fake_index("__init__.py", "_internal/commands/debug.py", "_vendor/__init__.py", "_vendor/rich/__init__.py",
+                     "_vendor/six.py", "_vendor/vendor.txt")
+    pip.root = Path("C:/x/pip")
+    assert py.resolve(ImportRef("pip._vendor.*", [], "dynamic"), "_internal/commands/debug.py", pip) == [
+        "_vendor/rich/__init__.py", "_vendor/six.py"]
+
+
+def test_a_name_built_in_a_loop_over_written_strings_is_each_of_them():
+    # pip/_vendor/requests/packages.py: not every vendored package, only the two the loop names
+    source = ('import importlib\nfor package in ("urllib3", "idna"):\n'
+              '    vendored = "pip._vendor." + package\n    locals()[package] = __import__(vendored)\n'
+              'for name in ["users", "todos"]:\n    importlib.import_module(f".routes.{name}", __package__)\n'
+              'for name in NAMES:\n    importlib.import_module(f"plugins.{name}")\n'
+              'for name in ("a", "b"):\n    importlib.import_module(f"tools.{name}.{other}")\n')
+    facts = py.analyze("pkg/__init__.py", source)
+    assert [(i.spec, i.level, i.line) for i in facts.imports if i.kind == "dynamic"] == [
+        ("pip._vendor.urllib3", 0, 4), ("pip._vendor.idna", 0, 4), ("routes.users", 1, 6), ("routes.todos", 1, 6),
+        ("plugins.*", 0, 8),  # a loop over values the file does not write: the pattern
+        ("tools.*.*", 0, 10)]  # another part still unknown: the pattern
+
+
+def test_built_module_names_in_a_file_with_a_syntax_error():
+    facts = py.analyze("pkg/broken.py", 'import importlib\nm = importlib.import_module("pkg.plugins." + name)\n'
+                                        'n = importlib.import_module(f"pkg.extra.{x}")\no = __import__("json")\n'
+                                        'p = importlib.import_module("." + name, __package__)\ndef broken(:\n')
+    assert facts.parse_error
+    assert [(i.spec, i.level) for i in facts.imports if i.kind == "dynamic"] == [
+        ("pkg.plugins.*", 0), ("pkg.extra.*", 0), ("json", 0)]  # the relative one needs the full analysis
+
+
+def test_patterns_name_no_framework():
+    facts = py.analyze("app.py", 'import importlib\nm = importlib.import_module(f"flask.{name}")\n')
+    assert facts.frameworks == set() and [i.spec for i in facts.imports] == ["importlib", "flask.*"]

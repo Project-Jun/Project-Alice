@@ -11,6 +11,8 @@ and may expose:
 
     project_links(index) -> dict[str, list[str]]   file -> project files it loads that are not
                                                    imports in code (index.html -> app.js, app.css)
+    project_loaded(index) -> dict[str, str]        rel_path -> Korean note, for files a framework
+                                                   loads by itself (Nuxt pages, SvelteKit +page.svelte)
 
 Modules load lazily so that one broken analyzer does not stop the others. Loading happens
 once, under a lock: the server analyzes in several threads at once (two tabs opened right

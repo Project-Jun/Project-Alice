@@ -80,3 +80,10 @@ def test_two_first_builds_at_once_give_the_same_graph(monkeypatch, demo_root):
         edges = sum(len(n["u"]) for n in graph["nodes"].values() if n["t"] == "f")
         assert edges == 12 and graph["stats"]["entries"] == 2 and graph["stats"]["orphans"] == 1
         assert graph["nodes"]["backend/main.py"]["lang"] == "python" and graph["warnings"] == []
+
+
+def test_vue_and_svelte_files_go_to_the_javascript_analyzer():
+    js = lang.analyzer_for("src/App.vue")
+    assert js is not None and js.__name__ == "codevision.lang.js_lang"
+    assert lang.analyzer_for("src/routes/+page.svelte") is js and lang.analyzer_for("src/Big.VUE") is js
+    assert lang.analyzer_for("styles/app.css") is None

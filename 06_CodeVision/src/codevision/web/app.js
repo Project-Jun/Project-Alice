@@ -6,7 +6,9 @@
    - on screens wide enough not to be phones, a family too wide for one row wraps onto a few lines
      (famw) before it falls back to the outline;
    - from 1024px the panel stands beside the diagram and stays in view (app.css .cvb); below that it
-     is under the diagram, and choosing a file brings it into view. */
+     is under the diagram, and choosing a file brings it into view.
+   AI explanations (aiCtl) are not in the mockup: the header chip opens the AI panel, and while AI is on
+   the side panel and the tree labels use the AI's text, node.x (docs/architecture.md 6 and 7). */
 (() => {
   'use strict';
 
@@ -72,20 +74,34 @@
   const projName = G => str(G.name) || baseName(G.source && G.source.path) || '프로젝트';
 
   // ---------- server ----------
-  async function api(url, method) {
+  // An error keeps the HTTP status and the "code" that the /api/ai/ replies add ("timeout", "busy" ...).
+  function fail(msg, code, status) {
+    const e = new Error(msg);
+    e.code = code || '';
+    e.status = status || 0;
+    return e;
+  }
+  // body: the JSON to POST ({} when none). ms: stop waiting after that long (the error's code is then "timeout").
+  async function api(url, method, body, ms) {
     const post = method === 'POST';
     const headers = {'X-CV-Token': TOKEN};
     if (post) headers['Content-Type'] = 'application/json';
-    let r;
+    const ctl = ms && typeof AbortController === 'function' ? new AbortController() : null;
+    const tm = ctl ? setTimeout(() => ctl.abort(), ms) : 0;
+    let r, j = null;
     try {
-      r = await fetch(url, {method: post ? 'POST' : 'GET', headers, body: post ? '{}' : undefined, cache: 'no-store'});
-    } catch (e) {
-      throw new Error('CodeVision 프로그램에 연결하지 못했어요. 프로그램이 켜져 있는지 확인해 주세요.');
+      try {
+        r = await fetch(url, {method: post ? 'POST' : 'GET', headers, body: post ? JSON.stringify(body || {}) : undefined, cache: 'no-store', signal: ctl ? ctl.signal : undefined});
+      } catch (e) {
+        if (ctl && ctl.signal.aborted) throw fail('답이 너무 늦어서 기다리기를 멈췄어요. 잠시 뒤에 다시 해 주세요.', 'timeout');
+        throw fail('CodeVision 프로그램에 연결하지 못했어요. 프로그램이 켜져 있는지 확인해 주세요.', 'network');
+      }
+      try { j = await r.json(); } catch (e) { j = null; }
+    } finally {
+      clearTimeout(tm);
     }
-    let j = null;
-    try { j = await r.json(); } catch (e) { j = null; }
-    if (j && typeof j.error === 'string' && j.error) throw new Error(j.error);
-    if (!r.ok || !j || typeof j !== 'object') throw new Error('요청을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.');
+    if (j && typeof j.error === 'string' && j.error) throw fail(j.error, typeof j.code === 'string' ? j.code : '', r.status);
+    if (!r.ok || !j || typeof j !== 'object') throw fail('요청을 처리하지 못했어요. 잠시 뒤에 다시 해 주세요.', '', r.status);
     return j;
   }
 
@@ -96,11 +112,12 @@
   }
 
   // ---------- screens ----------
-  let screen = '', busy = false, last = null, typed = '', view = null, ro = null;
+  let screen = '', busy = false, last = null, typed = '', view = null, ro = null, aic = null;
   const BRAND = '<h1 class="st-name" tabindex="-1"><i class="ti ti-binary-tree-2" aria-hidden="true"></i>CodeVision</h1>';
 
   function leave() {
     view = null;
+    if (aic) { aic.quit(); aic = null; } // a job goes on in the server; this screen just stops following it
     if (ro) { ro.disconnect(); ro = null; }
     app.classList.remove('wide');
   }
@@ -229,7 +246,9 @@
     app.innerHTML = header(G);
     const Cv = app.querySelector('.cvd');
     try {
-      view = tree(G, Cv, app.querySelector('.pnl'));
+      aic = aiCtl(G);
+      view = tree(G, Cv, app.querySelector('.pnl'), aic);
+      aic.attach(view);
       view.relayout();
     } catch (e) {
       console.error(e);
@@ -248,7 +267,6 @@
   function header(G) {
     const st = G.stats && typeof G.stats === 'object' ? G.stats : {};
     const src = G.source && typeof G.source === 'object' ? G.source : {};
-    const ai = G.ai && typeof G.ai === 'object' ? G.ai : {};
     const hidden = list(G.hidden).map(str).filter(Boolean);
     const warns = list(G.warnings).map(str).filter(Boolean);
     if (G.truncated && !warns.length) warns.push(TRUNC);
@@ -257,11 +275,10 @@
     let h = `<div class="cv"><div class="src"><span class="src-t"><i class="ti ti-folder" aria-hidden="true"></i><span class="src-k">${src.kind === 'demo' ? '예제 프로젝트' : '로컬 폴더'}</span>`;
     if (src.path) h += ` <span class="src-p">${pathHtml(src.path)}</span>`; // the space: for copying and screen readers
     h += '</span>';
-    // The AI chip opens its message in a line under the header, so it can be read without hovering.
-    const aiT = `<i class="ti ti-sparkles" aria-hidden="true"></i>AI 설명 ${ai.available ? '켜짐' : '꺼짐'}`, aiM = str(ai.message);
-    h += '<span class="src-r">' + (aiM ? `<button type="button" class="bd tc ai" data-act="ai" aria-expanded="false" aria-controls="cv-aim" title="${esc(aiM)}">${aiT}</button>` : `<span class="bd tc">${aiT}</span>`)
-      + '<button type="button" class="chip" data-act="home">다른 폴더</button></span></div>';
-    if (aiM) h += `<div class="aim" id="cv-aim" hidden><i class="ti ti-sparkles" aria-hidden="true"></i><span>${esc(aiM)}</span></div>`;
+    // The AI chip opens the AI panel under it (a sheet on phones); aiCtl fills in both.
+    h += '<div class="src-r"><button type="button" class="bd tc ai" data-act="ai" aria-haspopup="dialog" aria-expanded="false" aria-controls="cv-ai">'
+      + `<i class="ti ti-sparkles" aria-hidden="true"></i><span>AI 설명 꺼짐</span></button>${AI_PANEL}`
+      + '<button type="button" class="chip" data-act="home">다른 폴더</button></div></div>';
 
     h += `<div class="ttl"><i class="ti ti-folder-open" aria-hidden="true"></i><h1 tabindex="-1">${esc(projName(G))}</h1>`
       + `<span class="ttl-s">폴더 ${fmt(st.folders)} · 파일 ${fmt(st.files)} · 시작점 ${fmt(st.entries)} · 정리 후보 ${fmt(st.orphans)}</span>`;
@@ -296,12 +313,14 @@
 
     // On wide screens the panel stands beside the diagram and stays in view (app.css .cvb).
     h += '<div class="cvb"><div class="card dg"><div class="cvd" role="group" aria-label="프로젝트 구조 도식"><svg aria-hidden="true"><path stroke-width="1" stroke-linecap="square"/></svg></div>'
-      + `<div class="lg">${lg}</div></div><div class="card pnl" role="region" aria-label="선택한 항목 설명"></div></div></div>`;
+      + `<div class="lg">${lg}</div></div><div class="card pnl" role="region" aria-label="선택한 항목 설명"></div></div>`
+      + '<div class="sr-only" id="cv-say" aria-live="polite"></div></div>'; // AI news, also with the AI panel closed
     return h;
   }
 
   // ---------- diagram (port of design/mockup.html) ----------
-  function tree(G, Cv, Pn) {
+  // ai: the AI explanations (aiCtl) for the labels and the side panel.
+  function tree(G, Cv, Pn, ai) {
     const AR = {ui: [areaName(G, 'ui'), 'tu'], sv: [areaName(G, 'sv'), 'ts'], ot: [areaName(G, 'ot'), 'tn']};
     const MT = [{RF: 22, RL: 18, GP: 8, G0: 14, G1: 36, IF: 20, IL: 16, V: 100}, {RF: 20, RL: 16, GP: 8, G0: 10, G1: 28, IF: 18, IL: 14, V: 96}];
     const Sv = Cv.querySelector('svg'), PT = Sv.querySelector('path');
@@ -314,7 +333,9 @@
         n: str(x.n) || id, p: str(x.p) || id, t: f ? 'd' : 'f', a: own(FC, x.a) ? x.a : 'ot',
         s: str(x.s), d: str(x.d), l: num(x.l), e: !!x.e, o: !!x.o, i: ICON.test(str(x.i)) ? x.i : '',
         k: f ? list(x.k).map(str) : [], u: list(x.u).map(str), b: list(x.b).map(str), h: list(x.h).map(str),
-        f: list(x.f).filter(Array.isArray).map(r => [str(r[0]), str(r[1])])
+        f: list(x.f).filter(Array.isArray).map(r => [str(r[0]), str(r[1])]),
+        lang: str(x.lang), x: xOf(x.x), // x: the AI's explanation, when the server has one (s, d, f are the rule-based ones)
+        xs: xsOf(x.xs) // xs: why the server never sends this code file to the AI (XS_NOTE); '' for the others
       };
     });
     const RT = own(D, str(G.root)) ? str(G.root) : '.';
@@ -337,6 +358,8 @@
     const REL = dict();
     I.forEach(i => { REL[i] = dir(i) ? [] : [...new Set([...D[i].u, ...D[i].b])]; });
     const fill = i => (D[i].o ? '#BA7517' : FC[D[i].a]);
+    // The summary under a name: the AI's while AI is on and it has one.
+    const lbl = i => { const X = ai.on() && D[i].x; return X && X.s ? X.s : D[i].s; };
 
     // Every badge a node can show, so measure() can reserve room for the widest.
     const PR = dict(), MX = dict();
@@ -361,7 +384,8 @@
 
     // OL: nodes drawn as the outline; ROW: family row (0 = the root) of the nodes drawn as rows;
     // LN: the line they sit on (a family too wide for one line wraps, see famw); VO: siblings in drawn order.
-    let path = [], sel = RT, fo = null, W = 0, PL = null, POS = dict(), ORD = [], OPEN = new Set(), SHOWN = new Set(), prev = null, OL = new Set(), ROW = dict(), LN = dict(), VO = dict();
+    // late: labels changed since the diagram was last planned (AI answers put in place, see relabel).
+    let path = [], sel = RT, fo = null, W = 0, PL = null, POS = dict(), ORD = [], OPEN = new Set(), SHOWN = new Set(), prev = null, OL = new Set(), ROW = dict(), LN = dict(), VO = dict(), late = false;
     const MW = dict(), SW = dict(), BW = dict(), KW = new Map(), E = dict(), ST = dict();
     const vis = i => anc(i).every(a => path.includes(a));
     const f0 = str(G.focus);
@@ -387,11 +411,10 @@
       nl.firstChild.title = x.n; // long names can be cut short in the outline
       ST[i] = (x.e ? SB : '') + (x.o ? OB : '');
       nl.children[1].innerHTML = ST[i];
-      sl.lastChild.textContent = x.s;
-      sl.lastChild.title = x.s;
+      sl.lastChild.textContent = sl.lastChild.title = lbl(i);
       let t = null;
       if (dir(i) && x.k.length) { t = TG.cloneNode(true); t.dataset.cvToggle = i; n.appendChild(t); }
-      E[i] = {n, h, dot, ic: dot.firstChild, lb, nl, s1: nl.children[1], b1: nl.lastChild, s2: sl.firstChild, b2: sl.children[1], tg: lb.lastChild, t, sp: 1};
+      E[i] = {n, h, dot, ic: dot.firstChild, lb, nl, s1: nl.children[1], b1: nl.lastChild, s2: sl.firstChild, b2: sl.children[1], sm: sl.lastChild, tg: lb.lastChild, t, sp: 1};
       frag.appendChild(n);
     });
     Cv.appendChild(frag);
@@ -402,7 +425,7 @@
       I.forEach(i => PR[i].forEach(b => K.set(b[0] + b[1], b)));
       for (let v = 1; v <= MXA; v++) K.set('ta' + nLinks(v), ['ta', nLinks(v)]);
       const ks = [...K.values()], n = I.length;
-      z.innerHTML = I.map(i => { const x = D[i]; return `<span class="nl"><span class="nm">${esc(x.n)}</span>${x.e ? SB : ''}${x.o ? OB : ''}</span><span class="sm">${esc(x.s)}</span>`; }).join('')
+      z.innerHTML = I.map(i => { const x = D[i]; return `<span class="nl"><span class="nm">${esc(x.n)}</span>${x.e ? SB : ''}${x.o ? OB : ''}</span><span class="sm">${esc(lbl(i))}</span>`; }).join('')
         + ks.map(b => bd(b[0], b[1])).join('');
       Cv.appendChild(z);
       const c = z.children, w = e => Math.ceil(e.getBoundingClientRect().width);
@@ -410,6 +433,14 @@
       KW.clear();
       ks.forEach((b, j) => KW.set(b[0] + b[1], w(c[2 * n + j])));
       I.forEach(i => { BW[i] = PR[i].reduce((m, b) => Math.max(m, KW.get(b[0] + b[1])), 0); });
+      z.remove();
+    }
+    // Only the summary widths of ids, after their labels changed (AI explanations came in, or AI was turned on or off).
+    function remeasure(ids) {
+      const z = el('div', 'mz');
+      z.innerHTML = ids.map(i => `<span class="sm">${esc(lbl(i))}</span>`).join('');
+      Cv.appendChild(z);
+      ids.forEach((i, k) => { SW[i] = Math.ceil(z.children[k].getBoundingClientRect().width); });
       z.remove();
     }
 
@@ -685,32 +716,47 @@
         box.appendChild(b);
       });
     }
-    function panel() {
+    // keep: the same node drawn again (an AI answer came in, 다시 시도, 기본 설명 보기): the panel keeps its
+    // scroll, and the focus stays on the same control (or the AI line, when that control is gone).
+    function panel(keep) {
       const id = sel, x = D[id], ar = AR[x.a], dr = dir(id);
+      ai.want(id); // while AI is on, a code file or folder without an AI explanation asks for one
+      // The AI's text when it is shown; its f has the same signatures, with the rule text where it said nothing.
+      const X = ai.use(id, x) ? x.x : null, s = X && X.s || x.s, d = X && X.d || x.d;
+      const fs = X ? x.f.map(([k, v]) => [k, X.f.get(k) || v]) : x.f;
       let tags = x.o ? OB : id === RT ? bd('tn', '프로젝트') : bd(ar[1], ar[0]);
       if (x.e) tags += SB;
       const ic = dr ? (OPEN.has(id) ? 'ti-folder-open' : 'ti-folder') : x.i || 'ti-file-code';
       const meta = dr ? nItems(x.k.length) : x.l ? fmt(x.l) + '줄' : '';
       // The bold line is left out when the description starts with it anyway (a docstring's first
       // sentence, often cut short with "…").
-      const sq = t => t.replace(/\s+/g, ' ').trim(), dup = sq(x.d).startsWith(sq(x.s).replace(/(…|\.\.\.)$/, '').trimEnd());
+      const sq = t => t.replace(/\s+/g, ' ').trim(), dup = sq(d).startsWith(sq(s).replace(/(…|\.\.\.)$/, '').trimEnd());
       let h = `<div class="ph"><span class="pd ${x.o ? 'f-o' : 'f-' + x.a}"><i class="ti ${ic}" aria-hidden="true"></i></span><span class="pn">${esc(x.n)}</span>${tags}<span class="pm">${meta}</span></div>`
-        + `<div class="pp">${esc(x.p)}</div>${dup ? '' : `<div class="ps">${esc(x.s)}</div>`}<div class="pds">${esc(x.d)}</div>`;
+        + `<div class="pp">${esc(x.p)}</div>${ai.row(id, x)}${dup ? '' : `<div class="ps">${esc(s)}</div>`}<div class="pds">${esc(d)}</div>`;
       if (dr) h += `<div class="sc">${lab('들어 있는 것')}<div data-chips="k"></div></div>`;
       else {
         const c = `<div class="sc">${lab('이 파일이 쓰는 파일')}<div data-chips="u"></div><div class="gap"></div>${lab('이 파일을 쓰는 파일')}<div data-chips="b"></div></div>`;
         // Each description sits right under its name (app.css .fn).
-        h += x.f.length ? `<div class="pg"><div class="sc">${lab('주요 함수')}${x.f.map(([k, v]) => `<div class="fn"><code>${esc(k)}</code>${v ? `<span>${esc(v)}</span>` : ''}</div>`).join('')}</div>${c}</div>` : c;
+        h += fs.length ? `<div class="pg"><div class="sc">${lab('주요 함수')}${fs.map(([k, v]) => `<div class="fn"><code>${esc(k)}</code>${v ? `<span>${esc(v)}</span>` : ''}</div>`).join('')}</div>${c}</div>` : c;
       }
+      const a = keep ? document.activeElement : null, was = a && a !== Pn && Pn.contains(a) ? a : null, top = Pn.scrollTop;
       Pn.innerHTML = h;
       Pn.querySelectorAll('[data-chips]').forEach(box => chips(box, x[box.dataset.chips], x.h, box.dataset.chips !== 'k'));
-      Pn.scrollTop = 0; // beside the diagram the panel scrolls by itself when it is taller than the window
+      if (!keep) { Pn.scrollTop = 0; return; } // beside the diagram the panel scrolls by itself when it is taller than the window
+      Pn.scrollTop = top;
+      if (was) {
+        const k = was.dataset.ai != null ? 'ai' : was.dataset.go != null ? 'go' : '';
+        const t = (k && [...Pn.querySelectorAll(`[data-${k}]`)].find(b => b.dataset[k] === was.dataset[k])) || Pn.querySelector('.pa');
+        if (t) t.focus({preventScroll: true});
+      }
     }
 
     // Planned on every render, so a new open path gets a new plan. A row that turns out not to fit
     // once drawn becomes the outline under its parent (the root row: the whole diagram).
-    function render() {
+    // mode: 'keep' draws the panel again for the same node (see panel), 'skip' leaves it as it is.
+    function render(mode) {
       OPEN = new Set(path);
+      late = false;
       PL = plan();
       for (;;) {
         draw();
@@ -720,7 +766,35 @@
         PL.k = Math.max(0, b - 1);
         if (!PL.k) PL.m = MT[W < 480 ? 1 : 0];
       }
-      panel();
+      if (mode !== 'skip') panel(mode === 'keep');
+    }
+    // New labels for ids (AI explanations came in, or AI was turned on or off): their summaries have new widths,
+    // so the diagram is planned again with the same open folders and selection, and the page keeps its scroll.
+    // force: draw the side panel again even when the selected node is not one of them.
+    // quiet: AI answers that come in by themselves (전체 설명 batches, the answer for a file picked earlier). Nothing
+    // moves under the pointer: each new text goes in place, cut short at its node's current width (its tooltip has
+    // it whole), and the next plan (a click, a folder, the window, the end of 전체 설명: replan) gives it its room.
+    function relabel(ids, force, quiet) {
+      ids = ids.filter(i => seen.has(i));
+      if (!W) return;
+      if (!ids.length) { if (force) panel(true); return; }
+      ids.forEach(i => { E[i].sm.textContent = E[i].sm.title = lbl(i); });
+      remeasure(ids);
+      if (quiet) {
+        late = true;
+        if (force || ids.includes(sel)) panel(true);
+        return;
+      }
+      const sx = window.scrollX, sy = window.scrollY;
+      render(force || ids.includes(sel) ? 'keep' : 'skip');
+      if (window.scrollX !== sx || window.scrollY !== sy) window.scrollTo(sx, sy);
+    }
+    // The plan again for labels put in quietly (see relabel), with the same open folders, selection and scroll.
+    function replan() {
+      if (!late || !W) return;
+      const sx = window.scrollX, sy = window.scrollY;
+      render('skip');
+      if (window.scrollX !== sx || window.scrollY !== sy) window.scrollTo(sx, sy);
     }
     function act(i) {
       if (dir(i)) { if (!path.includes(i)) path = [...anc(i), i]; } else { if (!vis(i)) path = anc(i); fo = i; }
@@ -793,7 +867,600 @@
       measure();
       render();
     }
-    return {relayout, resize() { if (Cv.clientWidth !== W) relayout(); }, reveal() { if (POS[sel]) show(E[sel].h, true); }};
+    return {
+      relayout, resize() { if (Cv.clientWidth !== W) relayout(); }, reveal() { if (POS[sel]) show(E[sel].h, true); },
+      // for aiCtl
+      sel: () => sel,
+      node: i => (own(D, i) && seen.has(i) ? D[i] : null),
+      ids: () => I,
+      setX(i, v) { const X = own(D, i) && seen.has(i) ? xOf(v) : null; if (X) D[i].x = X; return !!X; },
+      clearX() { const c = I.filter(i => D[i].x); c.forEach(i => { D[i].x = null; }); return c; },
+      // the server's node.xs from a new analysis; true when it changed
+      setXs(i, v) { const m = xsOf(v); if (!own(D, i) || !seen.has(i) || D[i].xs === m) return false; D[i].xs = m; return true; },
+      relabel,
+      replan,
+      repaint() { if (W) panel(true); }
+    };
+  }
+
+  // ---------- AI explanations ----------
+  // A model on this computer, through the server (docs/architecture.md 6 and 7). The header chip opens the AI
+  // panel (#cv-ai): the server's status sentence, "Ollama 켜기", the on/off switch, the model, and 전체 설명
+  // 만들기 with its progress. It is a popover under the chip, and a sheet along the bottom on phones (app.css).
+  // While AI is on, the tree labels and the side panel use node.x where there is one, and a selected code file
+  // or folder without one goes to /api/ai/explain, one request at a time. While AI is off, nothing here asks
+  // the server for anything by itself.
+  // The estimate before 전체 설명 만들기, measured with qwen2.5:7b fully on an 8 GB GPU: a folder takes about 1 s,
+  // a file about 2 s plus 0.55 s for each main function the AI describes (8 at most). Above AI_ASK s, ask first.
+  const AI_DIR = 1, AI_FILE = 2, AI_FN = 0.55, AI_ASK = 300;
+  const AI_COLD = 3000, AI_BATCH = 1500, AI_POLL = 1000; // ms: before the cold-start note; between job batches; job checks
+  // ms to wait for one explanation and for Ollama to start: longer than the server waits (180 s, 20 s),
+  // so its own sentence comes first
+  const AI_WAIT = 200000, AI_START = 45000;
+  const AI_NONE = 'AI 설명을 쓸 수 없어요.';
+  const COLD_NOTE = '처음 한 번은 AI가 준비하느라 30초쯤 걸릴 수 있어요.';
+  const REFRESHING = '이미 만들어 둔 설명을 확인하고 있어요…'; // while refreshX runs (the AI panel and the side panel)
+  // node.xs (/api/analyze, while AI is on): why the server never sends this code file to the AI. The side panel
+  // says so instead of asking, and 전체 설명 만들기 does not count it. The same texts as messages.MARK_NOTES.
+  const XS_NOTE = {secret: '비밀 정보가 들어 있을 수 있는 파일이라 AI에 보내지 않아요.', too_big: '파일이 너무 커서 AI 설명을 만들지 않아요.',
+    unreadable: '이 파일을 읽을 수 없어서 AI 설명을 만들지 않아요.'};
+  const xsOf = v => (typeof v === 'string' && own(XS_NOTE, v) ? v : '');
+  const SHEET = window.matchMedia ? window.matchMedia('(max-width: 560px)') : {matches: false}; // app.css, the same width
+  const OLLAMA = ['running', 'stopped', 'missing'];
+  const AI_PANEL = '<div class="aip" id="cv-ai" role="dialog" aria-labelledby="cv-ai-h" aria-describedby="cv-ai-m" hidden>'
+    + '<div class="aip-hd"><h2 id="cv-ai-h" tabindex="-1"><i class="ti ti-sparkles" aria-hidden="true"></i>AI 설명</h2>'
+    + '<button type="button" class="aip-x" data-ai="close" aria-label="닫기" title="닫기"><span aria-hidden="true">×</span></button></div>'
+    + '<p class="aip-m" id="cv-ai-m" role="status"></p>'
+    + '<p class="aip-help" hidden>ollama.com에서 Ollama를 받아 설치해 주세요.</p>'
+    + '<div class="aip-st" hidden><button type="button" class="pri" data-ai="start"><i class="ti ti-loader-2 spin" aria-hidden="true" hidden></i><span>Ollama 켜기</span></button></div>'
+    + '<div class="aip-row" data-p="sw"><label class="aip-l" for="cv-ai-sw">AI 설명 쓰기</label>'
+    + '<button type="button" class="sw" id="cv-ai-sw" role="switch" aria-checked="false" data-ai="switch"><span class="sw-k"></span></button></div>'
+    + '<div class="aip-row" data-p="model"><label class="aip-l" for="cv-ai-model">AI 모델</label><select id="cv-ai-model"></select></div>'
+    + '<p class="aip-hint" hidden></p>'
+    + '<p class="aip-err" role="alert" hidden></p>'
+    + '<div class="aip-all" hidden><p class="aip-end" hidden></p><p class="aip-est"></p><button type="button" class="pri" data-ai="run">전체 설명 만들기</button>'
+    + '<div class="aip-cf" hidden><p class="aip-cft"></p><div class="aip-btns"><button type="button" class="pri" data-ai="go">시작하기</button><button type="button" data-ai="nogo">취소</button></div></div>'
+    + '<div class="aip-job" hidden><div class="aip-jt"><span class="aip-jn"></span><span class="aip-jc"></span></div>'
+    + '<div class="aip-bar" role="progressbar" aria-label="전체 설명 진행 상황" aria-valuemin="0"><span></span></div>'
+    + '<p class="aip-cur"></p><p class="aip-eta"></p><button type="button" data-ai="stop">멈추기</button></div>'
+    + '</div></div><div class="aib" hidden></div>';
+
+  const txt = v => (typeof v === 'string' ? v.trim() : '');
+  // The status block (graph.ai, /api/ai/status, /settings, /start). ok: the server has local AI; the skeleton
+  // before it sent only provider, available and message, and then the panel shows that sentence alone.
+  function aiStatus(a) {
+    a = a && typeof a === 'object' ? a : {};
+    const ok = typeof a.enabled === 'boolean', enabled = ok && a.enabled;
+    return {
+      ok, enabled, available: enabled && a.available === true, model: txt(a.model), message: txt(a.message),
+      ollama: OLLAMA.includes(a.ollama) ? a.ollama : '', canStart: a.can_start === true,
+      models: list(a.models).filter(m => m && typeof m === 'object' && txt(m.name)).map(m => ({name: txt(m.name), size: +m.size || 0})),
+      rec: list(a.recommended).map(txt).filter(Boolean)
+    };
+  }
+  // node.x, {s, d, f: [[signature, text], …]}, as {s, d, f: Map(signature -> text)}; null when it says nothing.
+  function xOf(v) {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    const s = txt(v.s), d = txt(v.d), f = new Map();
+    list(v.f).forEach(r => { if (Array.isArray(r) && txt(r[1])) f.set(str(r[0]), txt(r[1])); });
+    return s || d || f.size ? {s, d, f} : null;
+  }
+  const canAI = x => !!x && (x.t === 'd' || !!x.lang); // code files and folders (the root too)
+  const gb = b => (b >= 1e9 ? (b / 1e9).toFixed(1) + 'GB' : b >= 1e6 ? Math.round(b / 1e6) + 'MB' : '');
+  // "약 18분", "약 1시간 5분"
+  function dur(sec) {
+    const m = Math.max(1, Math.ceil(sec / 60));
+    return '약 ' + (m < 60 ? fmt(m) + '분' : fmt(Math.floor(m / 60)) + '시간' + (m % 60 ? ' ' + (m % 60) + '분' : ''));
+  }
+  // The AI panel is updated in place (a job reports every second): only what changed is written, so focus,
+  // a screen reader's place and an open model list stay where they are.
+  const putT = (e, t) => { if (e.textContent !== t) e.textContent = t; };
+  const putA = (e, k, v) => { if (e.getAttribute(k) !== v) e.setAttribute(k, v); };
+  const putH = (e, h) => { if (e.hidden !== h) e.hidden = h; };
+  const shown = e => !!e && e.getClientRects().length > 0;
+
+  function aiCtl(G) {
+    const src = G.source && typeof G.source === 'object' ? G.source : {};
+    const proj = src.kind === 'demo' ? 'demo' : txt(src.path); // the project, as /api/ai/ calls name it
+    const errs = dict(), pend = new Map(); // errs: node -> {msg, code, last (the server will not explain it), busy}
+    let st = aiStatus(G.ai), V = null, dead = false, stamp = 0, applied = 0, gen = 0, xReq = 0;
+    let chip = null, pop = null, back = null, P = null, open = false, ask = false, busy = '', err = '', refreshing = false;
+    let req = null, coldT = 0, peek = null, job = null, pollT = 0, flushT = 0, lastFlush = 0, opener = null;
+
+    const on = () => st.enabled;
+    const running = () => !!job && job.state === 'running';
+    const use = (i, x) => on() && !!x.x && peek !== i; // the side panel shows the AI's text (peek: the rule text instead)
+    // The node's own request for the model in use is out. Then that request speaks for it while refreshX runs: its
+    // loader (and cold note) stays on the AI line, and its answer is what the screen reader hears (see settled).
+    const asking = i => !!req && req.id === i && req.gen === gen;
+    function say(m) { // the screen reader hears it, even with the AI panel closed
+      const r = app.querySelector('#cv-say');
+      if (!r || !m) return;
+      r.textContent = '';
+      setTimeout(() => { if (!dead) r.textContent = m; }, 50);
+    }
+    // Code files and folders with no AI explanation yet: how many (n), and about how many seconds they take
+    // (sec, see AI_DIR). Files the server never sends to the AI (node.xs, or turned down when asked) are left out
+    // and counted in m.
+    function todo() {
+      let n = 0, sec = 0, m = 0;
+      V.ids().forEach(i => {
+        const x = V.node(i);
+        if (!canAI(x) || x.x) return;
+        if (x.xs || (errs[i] && errs[i].last)) { m++; return; }
+        n++;
+        sec += x.t === 'd' ? AI_DIR : AI_FILE + AI_FN * Math.min(8, x.f.length);
+      });
+      return {n, sec, m};
+    }
+
+    // ----- one explanation at a time for the side panel -----
+    // When the answer comes, the node selected by then goes next if it still needs one. An answer for a node that
+    // is no longer selected is kept for its label and for later, but the panel stays on what the user looks at.
+    // While refreshX runs nothing is asked: what it brings may be the answer (x) or a mark (xs); it asks when it settles.
+    function want(i) {
+      const x = V && V.node(i);
+      if (dead || req || refreshing || !x || !proj || !st.available || !canAI(x) || x.x || x.xs || errs[i]) return;
+      const r = req = {id: i, cold: false, gen};
+      clearTimeout(coldT);
+      coldT = setTimeout(() => { if (req === r) { r.cold = true; redo(); } }, AI_COLD);
+      // mine: the answer is for the model in use (one asked before the model changed is dropped). The side panel and
+      // the screen reader hear only of answers the page shows: for the selected node, while AI is on.
+      api('/api/ai/explain', 'POST', {project: proj, node: i}, AI_WAIT).then(j => {
+        if (dead) return;
+        free(r);
+        const mine = r.gen === gen;
+        if (mine && !got([[i, j.x]], true)) errs[i] = {msg: 'AI의 답을 읽지 못했어요.', code: 'bad_answer'};
+        if (mine && on() && V.sel() === i) { if (errs[i]) V.repaint(); say(errs[i] ? errs[i].msg : 'AI 설명이 나왔어요.'); }
+        want(V.sel());
+      }, e => {
+        if (dead) return;
+        free(r);
+        const c = e.code, mine = r.gen === gen;
+        if (c === 'off' || c === 'not_running' || c === 'no_model') { st = Object.assign({}, st, {available: false, message: e.message}); status(); }
+        else if (mine) errs[i] = {msg: e.message, code: c, last: c === 'not_code' || c === 'secret' || c === 'too_big', busy: c === 'busy'};
+        if (mine && on() && V.sel() === i) { V.repaint(); if (c !== 'busy' || !running()) say(e.message); }
+        paint();
+        want(V.sel());
+      });
+    }
+    function free(r) {
+      if (req === r) req = null;
+      clearTimeout(coldT);
+    }
+    function redo() { // the side panel again, when it shows a node still waiting for its explanation
+      const x = V.node(V.sel());
+      if (on() && canAI(x) && !x.x) V.repaint();
+    }
+    // The AI line of the side panel, under the path ('' while AI is off and for files that are not code).
+    function row(i, x) {
+      if (!on() || !canAI(x)) return '';
+      // with an icon, the words and their button wrap beside it (pa-b), not under it
+      const line = (c, ic, body) => `<div class="pa${c}" tabindex="-1">${ic ? `<i class="ti ${ic}" aria-hidden="true"></i><div class="pa-b">${body}</div>` : body}</div>`;
+      const t = s => `<span class="pa-t">${esc(s)}</span>`, e = errs[i];
+      if (x.x) {
+        return peek === i ? line('', '', '<span class="bd tn">기본 설명</span><button type="button" class="lnk" data-ai="peek">AI 설명 보기</button>')
+          : line('', '', '<span class="bd aix"><i class="ti ti-sparkles" aria-hidden="true"></i>AI 설명</span><button type="button" class="lnk" data-ai="peek">기본 설명 보기</button>');
+      }
+      if (x.xs) return line(' note', 'ti-info-circle', t(XS_NOTE[x.xs])); // never sent: nothing to ask or retry
+      if (e && e.busy && running()) return line(' note', 'ti-info-circle', t('전체 설명을 만드는 중이에요. 이 항목 차례가 오면 설명이 보여요.'));
+      if (e && e.last) return line(' note', 'ti-info-circle', t(e.msg));
+      if (e) return line(' bad', 'ti-alert-circle', t(e.msg) + '<button type="button" class="sbtn" data-ai="retry"><i class="ti ti-refresh" aria-hidden="true"></i>다시 시도</button>');
+      if (!st.available || !proj) return line(' note', 'ti-info-circle', t(st.message || AI_NONE) + (proj ? '<button type="button" class="sbtn" data-ai="open">AI 설정 열기</button>' : ''));
+      if (refreshing && !asking(i)) return line(' load', 'ti-loader-2 spin', t(REFRESHING)); // nothing is asked for it yet (see want)
+      return line(' load', 'ti-loader-2 spin', t('AI가 설명을 쓰고 있어요…') + (req && req.cold ? `<span class="pa-n">${esc(COLD_NOTE)}</span>` : ''));
+    }
+    // AI explanations for some nodes: kept, and shown in the tree and the side panel while AI is on.
+    // quiet: they came in by themselves (an answer, a job batch), so the tree keeps its plan (see tree relabel).
+    function got(rs, quiet) {
+      const ch = [];
+      rs.forEach(r => { if (V.setX(r[0], r[1])) { ch.push(r[0]); delete errs[r[0]]; } });
+      if (ch.length) {
+        if (on()) V.relabel(ch, false, quiet);
+        paint();
+      }
+      return ch.length;
+    }
+
+    // ----- status and settings -----
+    // Replies are applied in the order the requests went out, so an old status never undoes a newer setting.
+    function status() {
+      const k = ++stamp;
+      api('/api/ai/status').then(j => { if (!dead) setStatus(j, k); }, () => {});
+    }
+    function setStatus(a, k) {
+      if (k < applied) return;
+      applied = k;
+      const was = st, wasOn = on();
+      st = aiStatus(a);
+      const model = st.model !== was.model;
+      let ids = [];
+      if (model) { // explanations belong to the model that wrote them
+        gen++;
+        peek = null;
+        for (const i in errs) delete errs[i];
+        ids = V.clearX();
+      }
+      if (on() !== wasOn) ids = ids.concat(V.ids().filter(i => V.node(i).x));
+      const again = on() && (!wasOn || model) && proj;
+      if (again) refreshing = true; // before the panel is drawn again, so it does not ask for the selected node yet
+      if (ids.length || on() !== wasOn) V.relabel(ids, true);
+      else if (st.available !== was.available || (on() && st.message !== was.message)) V.repaint(); // the AI line may say it
+      if (again) refreshX();
+      paint();
+    }
+    // After AI is turned on or the model changes: the explanations the server already has for this project
+    // (/api/analyze adds them as node.x; it never calls the model), and the files it never sends (node.xs).
+    function refreshX() {
+      if (!proj) return;
+      const k = ++xReq, kg = gen; // kg: the model it was asked with (see want)
+      refreshing = true;
+      paint();
+      api(proj === 'demo' ? '/api/analyze?demo=1' : '/api/analyze?path=' + encodeURIComponent(proj)).then(g => {
+        if (dead || k !== xReq) return;
+        refreshing = false;
+        const N = g && g.nodes && typeof g.nodes === 'object' ? g.nodes : {};
+        const n = i => (own(N, i) && N[i] && typeof N[i] === 'object' ? N[i] : null);
+        const s = V.sel(), marked = V.ids().filter(i => V.setXs(i, (n(i) || {}).xs)); // first, so a marked file is not asked
+        // Its x are the old model's when the model changed while it ran with AI off (no new refresh dropped it then).
+        // The marks do not depend on the model.
+        const xs = kg === gen ? V.ids().filter(i => n(i) && n(i).x && !V.node(i).x).map(i => [i, n(i).x]) : [];
+        got(xs);
+        settled(s, marked.includes(s), xs.some(r => r[0] === s));
+      }, () => {
+        if (dead || k !== xReq) return;
+        refreshing = false;
+        settled(V.sel(), false, false);
+      });
+    }
+    // The end of refreshX for the selected node s. Its AI line is drawn again (it said REFRESHING), which asks for its
+    // explanation if it still needs one (panel calls want), and the screen reader hears what the refresh brought it:
+    // its explanation (fresh) or why it is never sent (mark), as when the answer comes from /api/ai/explain. A node that
+    // still holds its explanation keeps showing it (row: x before xs), so a new mark says nothing then; and while its own
+    // request is out (asking), that answer says it, not this refresh.
+    function settled(s, mark, fresh) {
+      const x = V.node(s);
+      paint();
+      if (on() && x && canAI(x)) {
+        V.repaint();
+        if (fresh && x.x) { if (!asking(s)) say('AI 설명이 나왔어요.'); }
+        else if (mark && x.xs && !x.x) say(XS_NOTE[x.xs]);
+      }
+      want(s);
+    }
+    function settings(body) {
+      if (busy) return;
+      busy = 'set';
+      err = '';
+      paint();
+      const k = ++stamp;
+      api('/api/ai/settings', 'POST', body).then(j => {
+        if (dead) return;
+        busy = '';
+        setStatus(j, k);
+      }, e => {
+        if (dead) return;
+        busy = '';
+        err = e.message;
+        paint(); // the switch and the model list go back to what the server has
+      });
+    }
+    function start() {
+      if (busy || !st.canStart) return;
+      busy = 'start';
+      err = '';
+      paint();
+      const k = ++stamp;
+      api('/api/ai/start', 'POST', {}, AI_START).then(j => {
+        if (dead) return;
+        busy = '';
+        setStatus(j, k);
+        if (!open) say(st.message);
+      }, e => {
+        if (dead) return;
+        busy = '';
+        err = e.message;
+        paint();
+        status();
+      });
+    }
+
+    // ----- 전체 설명 만들기 -----
+    function runAll(sure) {
+      if (busy || running() || refreshing || !st.available) return;
+      const w = todo();
+      if (!w.n) return;
+      if (!sure && w.sec > AI_ASK) { ask = true; paint(); return; } // a long job: say how long first
+      ask = false;
+      busy = 'run';
+      err = '';
+      paint();
+      api('/api/ai/explain-all', 'POST', {project: proj}).then(j => {
+        if (dead) return;
+        busy = '';
+        const id = str(j.job);
+        if (!id) { err = '전체 설명을 시작하지 못했어요. 다시 해 주세요.'; paint(); return; }
+        // est0: the estimate's seconds for what is left at the start; tw, t1, e1: see eta
+        job = {id, state: 'running', done: 0, total: 0, errors: 0, current: '', message: '', next: 0, t0: Date.now(), fails: 0, stopping: false,
+          est0: w.sec, tw: 0, t1: 0, e1: 0};
+        take(job, j);
+        say('전체 설명을 만들기 시작했어요.');
+      }, e => {
+        if (dead) return;
+        busy = '';
+        err = e.message;
+        if (e.code === 'off' || e.code === 'not_running' || e.code === 'no_model') status();
+        paint();
+      });
+    }
+    // A job block: its results wait in pend and reach the tree in batches, at most one every AI_BATCH ms.
+    function take(J, j) {
+      const rs = list(j.results);
+      rs.forEach(r => { if (Array.isArray(r) && typeof r[0] === 'string') pend.set(r[0], r[1]); });
+      J.next = Number.isFinite(j.next) ? j.next : J.next + rs.length;
+      J.done = num(j.done);
+      J.total = Math.max(num(j.total), J.done);
+      J.errors = num(j.errors);
+      J.current = str(j.current);
+      if (J.current && !J.tw) J.tw = Date.now(); // its first item began (it may wait for another folder's job first)
+      J.message = str(j.message);
+      const s = str(j.state);
+      J.state = s === 'done' || s === 'cancelled' || s === 'failed' ? s : 'running';
+      if (J.state !== 'running') { end(J); return; }
+      if (pend.size && !flushT) flushT = setTimeout(flush, Math.max(0, AI_BATCH - (Date.now() - lastFlush)));
+      clearTimeout(pollT);
+      pollT = setTimeout(poll, AI_POLL);
+      paint();
+    }
+    function poll() {
+      pollT = 0;
+      const J = job;
+      if (dead || !J || J.state !== 'running') return;
+      api('/api/ai/job?id=' + encodeURIComponent(J.id) + '&since=' + J.next).then(j => {
+        if (dead || job !== J || J.state !== 'running') return;
+        J.fails = 0;
+        take(J, j);
+      }, e => {
+        if (dead || job !== J || J.state !== 'running') return;
+        if (e.status === 404) { J.state = 'failed'; J.message = e.message; end(J); return; }
+        J.fails++;
+        pollT = setTimeout(poll, Math.min(10000, AI_POLL * 2 ** J.fails));
+        paint();
+      });
+    }
+    function flush() {
+      clearTimeout(flushT);
+      flushT = 0;
+      if (!pend.size) return;
+      lastFlush = Date.now();
+      const rs = [...pend];
+      pend.clear();
+      got(rs, true);
+    }
+    function end(J) {
+      clearTimeout(pollT);
+      pollT = 0;
+      flush();
+      for (const i in errs) if (errs[i].busy) delete errs[i];
+      if (!J.message) J.message = J.state === 'done' ? '전체 설명을 다 만들었어요.' : J.state === 'cancelled' ? '전체 설명 만들기를 멈췄어요.' : '전체 설명을 만들다가 멈췄어요.';
+      say(J.message);
+      if (J.state === 'failed') status();
+      paint();
+      V.replan(); // once, now: the labels that came in during the job get their room
+      V.repaint(); // the selected node may go next now
+    }
+    function stop() { // the server stops after the item it is on
+      const J = job;
+      if (!J || J.state !== 'running' || J.stopping) return;
+      J.stopping = true;
+      paint();
+      api('/api/ai/job/cancel', 'POST', {job: J.id}).then(() => {}, e => {
+        if (dead || job !== J) return;
+        J.stopping = false;
+        err = e.message;
+        paint();
+      });
+    }
+    function eta(J) {
+      const out = [];
+      if (J.fails >= 3) out.push('진행 상황을 받지 못하고 있어요. 계속 확인하고 있어요.');
+      // What is left by the estimate (todo: items the cache already had are done at once and are not in it),
+      // at the speed measured since the first new answer came in (t1, e1), so a slow first answer is left out.
+      const left = todo().sec, did = Math.max(0, J.est0 - left);
+      if (did > 0 && !J.t1) { J.t1 = Date.now(); J.e1 = did; }
+      // No new answer yet: the model may be loading, once this job is on its first item (tw). Before that it only waits
+      // for another folder's job, and the server's own sentence says so.
+      if (!J.t1 && left > 0) { if (J.tw && Date.now() - J.tw > AI_COLD) out.push(COLD_NOTE); }
+      else if (J.total > J.done) {
+        const ran = did - J.e1, speed = J.t1 && ran >= 6 ? Math.min(4, Math.max(.25, (Date.now() - J.t1) / 1000 / ran)) : 1;
+        const rest = left * speed;
+        out.push(rest < 60 ? '곧 끝나요.' : `남은 시간은 ${dur(rest)}이에요.`);
+      }
+      if (J.errors) out.push(`만들지 못한 항목이 ${fmt(J.errors)}개 있어요.`);
+      return out.join(' ');
+    }
+
+    // ----- the chip and the AI panel -----
+    function paintChip() {
+      const en = on(), run = running();
+      putA(chip, 'class', 'bd ai ' + (!en ? 'tc' : st.available || run ? 'ta' : 'tw'));
+      putA(chip.firstChild, 'class', 'ti ' + (run ? 'ti-loader-2 spin' : en && !st.available ? 'ti-alert-triangle' : 'ti-sparkles'));
+      putT(chip.lastChild, 'AI 설명 ' + (en ? '켜짐' : '꺼짐') + (run ? ` · ${fmt(job.done)}/${fmt(job.total)}` : ''));
+      putA(chip, 'title', st.message || AI_NONE);
+    }
+    function paint() {
+      if (!P || dead) return;
+      const a = document.activeElement, inside = !!a && pop.contains(a);
+      paintChip();
+      const ok = st.ok, en = on(), run = running(), w = todo(), n = w.n;
+      // the models, recommended ones first (in their order), then the rest as the server lists them
+      const rank = m => { const k = st.rec.indexOf(m.name); return k < 0 ? st.rec.length : k; };
+      const ms = st.models.map((m, j) => [m, j]).sort((p, q) => rank(p[0]) - rank(q[0]) || p[1] - q[1]).map(p => p[0]);
+      putT(P.msg, busy === 'start' ? 'Ollama를 켜고 있어요. 20초쯤 걸릴 수 있어요.' : st.message || AI_NONE);
+      putH(P.help, !(ok && st.ollama === 'missing'));
+      putH(P.stw, !(ok && en && (st.canStart || busy === 'start')));
+      putA(P.start, 'aria-disabled', String(!!busy));
+      putH(P.start.firstChild, busy !== 'start');
+      putT(P.start.lastChild, busy === 'start' ? '켜는 중…' : 'Ollama 켜기');
+      putH(P.swr, !ok);
+      putA(P.sw, 'aria-checked', String(en));
+      putA(P.sw, 'aria-disabled', String(busy === 'set'));
+      const showM = ok && st.ollama !== 'missing' && (ms.length > 0 || (en && !!st.model)); // no models without Ollama
+      putH(P.mr, !showM);
+      if (showM) {
+        const o = ms.length ? ms.map(m => [m.name, m.name + (gb(m.size) ? ' · ' + gb(m.size) : '') + (st.rec.includes(m.name) ? ' · 추천' : '')]) : [];
+        if (!o.some(p => p[0] === st.model)) o.unshift([st.model, st.model || '모델을 골라 주세요']);
+        const k = JSON.stringify(o);
+        if (P.sel.dataset.k !== k) {
+          P.sel.textContent = '';
+          o.forEach(p => { const e = el('option', '', p[1]); e.value = p[0]; P.sel.appendChild(e); });
+          P.sel.dataset.k = k;
+        }
+        if (P.sel.value !== st.model) P.sel.value = st.model;
+        P.sel.disabled = !ms.length || run;
+      }
+      putT(P.mh, 'Ollama가 켜지면 설치된 다른 모델도 고를 수 있어요.');
+      putH(P.mh, !(showM && !ms.length && st.ollama !== 'running')); // with Ollama on, no list means no model installed
+      putT(P.err, err);
+      putH(P.err, !err);
+      const all = ok && (st.available || run || (!!job && en)); // a job's last word stays while AI is on
+      putH(P.all, !all);
+      if (all) {
+        putT(P.est, refreshing ? REFRESHING
+          : !n ? (w.m ? `AI에 보내지 않는 파일 ${fmt(w.m)}개를 빼면 모두 AI 설명이 있어요.` : '모든 코드 파일과 폴더에 AI 설명이 있어요.')
+          : `아직 AI 설명이 없는 파일과 폴더가 ${fmt(n)}개 있어요. ${w.sec < 60 ? '1분 안에 끝나요.' : dur(w.sec) + ' 걸려요.'}`);
+        putH(P.est, run || ask);
+        putH(P.run, run || ask);
+        putA(P.run, 'aria-disabled', String(!!busy || refreshing || !n || !st.available));
+        putH(P.cf, run || !ask);
+        if (ask) putT(P.cft, `${fmt(n)}개를 만들려면 ${dur(w.sec)} 걸려요. 그동안 컴퓨터가 조금 느려질 수 있어요. 시작할까요?`);
+        putH(P.job, !run);
+        if (run) {
+          const J = job;
+          putT(P.jn, J.stopping ? '멈추는 중이에요. 지금 만드는 설명까지만 마칠게요.' : J.message || 'AI가 설명을 만들고 있어요.');
+          putT(P.jc, `${fmt(J.done)} / ${fmt(J.total)}`);
+          putA(P.bar, 'aria-valuemax', String(Math.max(1, J.total)));
+          putA(P.bar, 'aria-valuenow', String(J.done));
+          putA(P.bar, 'aria-valuetext', `${fmt(J.total)}개 중 ${fmt(J.done)}개`);
+          P.fill.style.width = (J.total ? Math.min(100, J.done / J.total * 100) : 0).toFixed(1) + '%';
+          const c = J.current && V.node(J.current);
+          putT(P.cur, c ? '지금: ' + c.p : '');
+          putH(P.cur, !c);
+          const t = J.stopping ? '' : eta(J);
+          putT(P.eta, t);
+          putH(P.eta, !t);
+          putA(P.stop, 'aria-disabled', String(J.stopping));
+          putT(P.stop, J.stopping ? '멈추는 중…' : '멈추기');
+        }
+        const fin = !!job && !run;
+        putH(P.end, !fin);
+        if (fin) { putT(P.end, job.message); putA(P.end, 'class', 'aip-end ' + job.state); }
+      }
+      // A control that went away (the job started, Ollama is on) hands the focus to the next useful one.
+      if (inside && !shown(a)) { const f = [P.go, P.stop, P.run, P.sw, P.h].find(shown); if (f) f.focus(); }
+    }
+    function openP() {
+      if (!pop || open) return;
+      const a = document.activeElement;
+      opener = a && (a === chip || a.dataset.ai === 'open') ? a : null; // where the focus goes back to
+      open = true;
+      ask = false;
+      putH(pop, false);
+      media();
+      putA(chip, 'aria-expanded', 'true');
+      paint();
+      P.h.focus();
+      status(); // fresh: Ollama may have been started or stopped outside CodeVision
+    }
+    // ret: the focus goes back to the chip, or to the side panel's "AI 설정 열기" when that opened it.
+    function close(ret) {
+      if (!open) return;
+      open = false;
+      ask = false;
+      putH(pop, true);
+      putH(back, true);
+      putA(chip, 'aria-expanded', 'false');
+      if (ret) (opener && opener.isConnected && shown(opener) ? opener : chip).focus();
+      opener = null;
+    }
+    // Phones get a sheet with a backdrop: it holds the focus (aria-modal). The popover leaves it free.
+    function media() {
+      if (!open) return;
+      if (SHEET.matches) pop.setAttribute('aria-modal', 'true');
+      else pop.removeAttribute('aria-modal');
+      putH(back, !SHEET.matches);
+    }
+    function key(e) {
+      if (!open) return;
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        e.preventDefault();
+        if (ask) { ask = false; paint(); P.run.focus(); return; }
+        const a = document.activeElement;
+        close(!a || a === document.body || a === chip || pop.contains(a));
+        return;
+      }
+      if (e.key !== 'Tab' || !SHEET.matches) return;
+      const f = [...pop.querySelectorAll('button, select')].filter(b => !b.disabled && shown(b)), a = document.activeElement;
+      if (!f.length) return;
+      if (e.shiftKey ? a === f[0] || !f.includes(a) : a === f[f.length - 1] || !pop.contains(a)) {
+        e.preventDefault();
+        (e.shiftKey ? f[f.length - 1] : f[0]).focus();
+      }
+    }
+    function down(e) { // a click outside closes the panel (the sheet's backdrop: see attach)
+      if (open && e.target !== back && !pop.contains(e.target) && !chip.contains(e.target)) close(false);
+    }
+    function act(a, b) {
+      if (dead || !V || !P || b.getAttribute('aria-disabled') === 'true') return;
+      const s = V.sel();
+      if (a === 'close') close(true);
+      else if (a === 'start') start();
+      else if (a === 'switch') {
+        if (busy) return;
+        if (st.enabled && running()) stop();
+        settings({enabled: !st.enabled});
+      } else if (a === 'run') runAll(false);
+      else if (a === 'go') runAll(true);
+      else if (a === 'nogo') { ask = false; paint(); P.run.focus(); }
+      else if (a === 'stop') stop();
+      else if (a === 'peek') { peek = peek === s ? null : s; V.repaint(); }
+      else if (a === 'retry') { delete errs[s]; V.repaint(); }
+      else if (a === 'open') openP();
+    }
+    function attach(v) {
+      V = v;
+      chip = app.querySelector('.cv button.ai');
+      pop = app.querySelector('#cv-ai');
+      back = app.querySelector('.cv .aib');
+      if (!chip || !pop || !back) return;
+      const q = s => pop.querySelector(s);
+      P = {h: q('h2'), msg: q('.aip-m'), help: q('.aip-help'), stw: q('.aip-st'), start: q('[data-ai="start"]'),
+        swr: q('[data-p="sw"]'), sw: q('[data-ai="switch"]'), mr: q('[data-p="model"]'), sel: q('select'), mh: q('.aip-hint'),
+        err: q('.aip-err'), all: q('.aip-all'), est: q('.aip-est'), run: q('[data-ai="run"]'), cf: q('.aip-cf'), cft: q('.aip-cft'),
+        go: q('[data-ai="go"]'), job: q('.aip-job'), jn: q('.aip-jn'), jc: q('.aip-jc'), bar: q('.aip-bar'), cur: q('.aip-cur'),
+        eta: q('.aip-eta'), stop: q('[data-ai="stop"]'), end: q('.aip-end')};
+      P.fill = P.bar.firstChild;
+      P.sel.addEventListener('change', () => {
+        const m = P.sel.value;
+        if (busy || !m || m === st.model) { paint(); return; }
+        settings({enabled: st.enabled, model: m});
+      });
+      // A tap on the sheet's backdrop is like 닫기. On click, not on pointerdown: the press itself takes the focus.
+      back.addEventListener('click', () => close(true));
+      // The popover closes when the focus moves on past it (the sheet keeps it, see key).
+      pop.addEventListener('focusout', e => {
+        const t = e.relatedTarget;
+        if (open && !SHEET.matches && t && !pop.contains(t) && t !== chip) close(false);
+      });
+      paint();
+    }
+    function quit() {
+      dead = true;
+      clearTimeout(pollT);
+      clearTimeout(flushT);
+      clearTimeout(coldT);
+    }
+    return {on, use, row, want, attach, act, key, down, media, quit, toggle() { if (open) close(true); else openP(); }};
   }
 
   // ---------- events and start-up ----------
@@ -806,11 +1473,16 @@
     else if (a === 'recent') run({kind: 'path', path: b.dataset.path});
     else if (a === 'retry') { if (last) run(last); }
     else if (a === 'home') { setQuery(null); showStart('[data-act="pick"]'); }
-    else if (a === 'ai') {
-      const m = app.querySelector('#cv-aim');
-      if (m) { m.hidden = !m.hidden; b.setAttribute('aria-expanded', String(!m.hidden)); }
-    }
+    else if (a === 'ai') { if (aic) aic.toggle(); }
   });
+  // The AI panel's controls, and the AI line in the side panel (aiCtl).
+  app.addEventListener('click', e => {
+    const b = e.target.closest('[data-ai]');
+    if (b && aic) aic.act(b.dataset.ai, b);
+  });
+  document.addEventListener('keydown', e => { if (aic) aic.key(e); });
+  document.addEventListener('pointerdown', e => { if (aic) aic.down(e); }, true);
+  if (SHEET.addEventListener) SHEET.addEventListener('change', () => { if (aic) aic.media(); });
   app.addEventListener('submit', e => {
     e.preventDefault();
     const inp = app.querySelector('#cv-path');

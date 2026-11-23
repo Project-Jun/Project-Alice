@@ -9,6 +9,11 @@ security headers. Wrong methods get 405, bodies are capped at MAX_BODY, and
 a failing analysis answers with a Korean 500 while its traceback goes to
 stderr. Each request runs in its own daemon thread, so a slow analysis never
 holds up the others.
+
+Local AI explanations (/api/ai/*) live in codevision.explain.AIService: one per
+server, with one worker thread that makes every model call. /api/analyze only
+adds graph["ai"], the cached node["x"] and node["xs"] (code files the AI never
+gets); it never calls the model.
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from codevision import explain
+from codevision.explain import messages as ai_text
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -61,8 +67,14 @@ API_ROUTES = {
     ("POST", "/api/pick-folder"): "api_pick_folder",
     ("GET", "/api/recent"): "api_recent",
     ("GET", "/api/ai/status"): "api_ai_status",
-    ("POST", "/api/explain"): "api_explain",
+    ("POST", "/api/ai/settings"): "api_ai_settings",
+    ("POST", "/api/ai/start"): "api_ai_start",
+    ("POST", "/api/ai/explain"): "api_ai_explain",
+    ("POST", "/api/ai/explain-all"): "api_ai_explain_all",
+    ("GET", "/api/ai/job"): "api_ai_job",
+    ("POST", "/api/ai/job/cancel"): "api_ai_job_cancel",
 }
+DEMO_PROJECT = "demo"  # what the screen sends as "project" for the example project
 
 DIALOG_TITLE = "분석할 폴더를 골라 주세요"
 PICKER_UNAVAILABLE = "이 컴퓨터에서는 폴더 선택 창을 열 수 없어요. 폴더 경로를 직접 붙여 넣어 주세요."
@@ -218,33 +230,54 @@ def folder_path(text: str) -> Path:
     return Path(os.path.abspath(expanded))
 
 
+# --- the project the screen analyzed ----------------------------------------
+
+def build_graph(root: Path, demo: bool = False) -> dict:
+    """Analyze a folder. codevision.graph is imported lazily, so the server starts regardless."""
+    graph_module = importlib.import_module("codevision.graph")
+    graph = graph_module.build(str(root))
+    if demo:
+        graph["source"] = {"kind": "demo", "path": ""}  # the screen shows "예제 프로젝트", not our install folder
+    return graph
+
+
+def project_key(root: Path, demo: bool = False) -> str:
+    """How the AI side names a project: "demo", or the folder path in the OS's case rules."""
+    return DEMO_PROJECT if demo else os.path.normcase(str(root))
+
+
+def project_from_text(text: str) -> tuple[str, Path, bool]:
+    """(key, root, demo) for the "project" the screen sends: "demo" or the analyzed folder's path."""
+    if text == DEMO_PROJECT:
+        return DEMO_PROJECT, DEMO_DIR, True
+    root = folder_path(text.strip().strip('"').strip())
+    return project_key(root), root, False
+
+
 # --- server ---------------------------------------------------------------
-
-def load_explainer() -> explain.Explainer:
-    """The configured explainer, or NoneExplainer when that provider is not ready."""
-    try:
-        return explain.get_explainer(explain.read_config())
-    except (NotImplementedError, ValueError) as exc:
-        log.warning("%s", exc)
-        return explain.NoneExplainer()
-
 
 class CodeVisionServer(ThreadingHTTPServer):
     daemon_threads = True
     # On Windows SO_REUSEADDR would let a second server take a port that is already in use.
     allow_reuse_address = os.name != "nt"
 
-    def __init__(self, port: int, web_dir: Path, explainer: explain.Explainer, cache):
+    def __init__(self, port: int, web_dir: Path, cache):
         self.token = secrets.token_urlsafe(32)
         self.web_dir = Path(web_dir)
-        self.explainer = explainer
         self.cache = cache
         super().__init__((HOST, port), Handler)
+        self.ai = explain.AIService(cache, build_graph)
 
     def server_bind(self) -> None:
         # Same as HTTPServer.server_bind minus socket.getfqdn(), which can stall on some networks.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
+
+    def server_close(self) -> None:
+        ai = getattr(self, "ai", None)
+        if ai is not None:
+            ai.close()  # waiting AI requests are answered; the worker stops after its current call
+        super().server_close()
 
     def handle_error(self, request, client_address) -> None:
         log.debug("connection problem with %s", client_address, exc_info=True)
@@ -258,36 +291,18 @@ class CodeVisionServer(ThreadingHTTPServer):
         return f"http://{HOST}:{self.port}"
 
 
-def create_server(port: int = DEFAULT_PORT, web_dir: str | Path | None = None,
-                  explainer: explain.Explainer | None = None, cache=None) -> CodeVisionServer:
+def create_server(port: int = DEFAULT_PORT, web_dir: str | Path | None = None, cache=None) -> CodeVisionServer:
     """Bind 127.0.0.1:port (a free port if that one is taken). Call serve_forever() next."""
     web_dir = Path(web_dir) if web_dir else WEB_DIR
-    if explainer is None:
-        explainer = load_explainer()
     if cache is None:
         cache = explain.ExplanationCache()
     try:
-        return CodeVisionServer(port, web_dir, explainer, cache)
+        return CodeVisionServer(port, web_dir, cache)
     except OSError:
         if port == 0:
             raise
         log.info("port %s is busy, using a free one", port)
-        return CodeVisionServer(0, web_dir, explainer, cache)
-
-
-def _source_reader(root: Path, graph: dict):
-    """read_source for explain.enrich(): raw bytes, only for files that are in the graph."""
-    files = {k for k, v in (graph.get("nodes") or {}).items() if v.get("t") == "f"}
-
-    def read_source(rel: str) -> bytes | None:
-        if rel not in files:
-            return None
-        try:
-            return (root / rel).read_bytes()
-        except OSError:
-            return None
-
-    return read_source
+        return CodeVisionServer(0, web_dir, cache)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -374,21 +389,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, f"폴더를 찾을 수 없어요: {raw}")
             if not os.path.isdir(root):
                 return self._error(400, f"파일이 아니라 폴더를 골라 주세요: {raw}")
+        ai = self.server.ai
+        ai.prefetch_status()  # Ollama is asked in the background while the folder is analyzed
         try:
-            graph_module = importlib.import_module("codevision.graph")  # lazy, so the server starts regardless
-            graph = graph_module.build(str(root))
+            graph = build_graph(root, demo)
         except Exception:
             # The traceback goes to stderr (the console or the desktop app's log), never into the reply.
             log.exception("analysis failed: %s", root)
             return self._error(500, ANALYSIS_FAILED)
-        if demo:
-            graph["source"] = {"kind": "demo", "path": ""}  # the screen shows "예제 프로젝트", not our install folder
         try:
-            explain.enrich(graph, self.server.explainer, self.server.cache, _source_reader(root, graph))
+            # graph["ai"], cached explanations (x) and the files the AI never gets (xs): the model is never called here
+            ai.annotate(graph, root)
         except Exception:
-            log.exception("AI explanation failed: %s", root)
-            graph["ai"] = {"provider": self.server.explainer.name, "available": False,
-                           "message": "AI 설명을 붙이다가 문제가 생겨서 기본 설명을 보여 줘요."}
+            log.exception("adding cached AI explanations failed: %s", root)
+            for node in (graph.get("nodes") or {}).values():
+                if isinstance(node, dict):
+                    node.pop("x", None)
+                    node.pop("xs", None)
+            graph["ai"] = ai.fallback_status(ai_text.ANNOTATE_FAILED)
+        ai.remember(project_key(root, demo), root, graph, demo)
         if not demo:
             try:
                 add_recent(str(root))
@@ -414,16 +433,86 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"items": load_recent()})
 
     def api_ai_status(self, params: dict, body: bytes) -> None:
-        self._json(200, explain.status(self.server.explainer))
+        # Asked when the AI panel opens, to see an Ollama started or stopped outside CodeVision: a fresh
+        # probe (a few ms), not the block /api/analyze reuses for a few seconds.
+        self._json(200, self.server.ai.status(fresh=True))
 
-    def api_explain(self, params: dict, body: bytes) -> None:
-        state = explain.status(self.server.explainer)
-        if not state["available"]:
-            return self._json(200, {"status": "not_configured", "message": state["message"]})
-        # Placeholder until a provider exists: explanations are added during /api/analyze.
-        self._json(200, {"status": "not_implemented", "message": "파일 하나씩 설명하는 기능은 아직 준비 중이에요."})
+    def api_ai_settings(self, params: dict, body: bytes) -> None:
+        data = self._body_object(body)
+        if data is not None:
+            self._ai_call(lambda: (200, self.server.ai.update_settings(data)))
+
+    def api_ai_start(self, params: dict, body: bytes) -> None:
+        if self._body_object(body) is not None:
+            self._ai_call(lambda: (200, self.server.ai.start_ollama()))
+
+    def api_ai_explain(self, params: dict, body: bytes) -> None:
+        data = self._body_object(body)
+        if data is None:
+            return
+        node = data.get("node")
+        if not isinstance(node, str) or not node or len(node) > MAX_PATH_CHARS:
+            return self._error(400, ai_text.BAD_REQUEST)
+        project = self._project(data)
+        if project is not None:
+            self._ai_call(lambda: (200, self.server.ai.explain(*project, node)))
+
+    def api_ai_explain_all(self, params: dict, body: bytes) -> None:
+        data = self._body_object(body)
+        project = self._project(data) if data is not None else None
+        if project is not None:
+            self._ai_call(lambda: self.server.ai.explain_all(*project))
+
+    def api_ai_job(self, params: dict, body: bytes) -> None:
+        job_id = params.get("id", [""])[0]
+        since = params.get("since", ["0"])[0] or "0"
+        if not job_id or len(job_id) > 64 or not (since.isascii() and since.isdigit()) or len(since) > 9:
+            return self._error(400, ai_text.BAD_REQUEST)
+        self._ai_call(lambda: (200, self.server.ai.job(job_id, int(since))))
+
+    def api_ai_job_cancel(self, params: dict, body: bytes) -> None:
+        data = self._body_object(body)
+        if data is None:
+            return
+        job_id = data.get("job")
+        if not isinstance(job_id, str) or not job_id or len(job_id) > 64:
+            return self._error(400, ai_text.BAD_REQUEST)
+        self._ai_call(lambda: (200, self.server.ai.cancel_job(job_id)))
 
     # --- helpers ---
+
+    def _body_object(self, body: bytes) -> dict | None:
+        """The POST body as a JSON object ({} when empty). On a problem, reply 400 and return None."""
+        if not body.strip():
+            return {}
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):  # RecursionError: nested too deeply ("[[[[...")
+            data = None
+        if not isinstance(data, dict):
+            self._error(400, ai_text.BAD_REQUEST)
+            return None
+        return data
+
+    def _project(self, data: dict) -> tuple[str, Path, bool] | None:
+        """(key, root, demo) for data["project"]. On a problem, reply 400 and return None."""
+        text = data.get("project")
+        if not isinstance(text, str) or not text.strip():
+            self._error(400, ai_text.BAD_REQUEST)
+            return None
+        try:
+            return project_from_text(text)
+        except BadPath as exc:
+            self._error(400, str(exc))
+            return None
+
+    def _ai_call(self, call) -> None:
+        """Run call() -> (status, data); an AIError becomes {"error", "code"} with its status."""
+        try:
+            status, data = call()
+        except explain.AIError as exc:
+            return self._json(exc.status, exc.reply())
+        self._json(status, data)
 
     def _host_ok(self) -> bool:
         """Exactly one Host header, naming our own address and port (DNS rebinding guard)."""

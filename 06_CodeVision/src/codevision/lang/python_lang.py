@@ -80,6 +80,8 @@ _APP_FACTORIES = {
 _DATA_BASES = {"Base", "BaseModel", "Model", "SQLModel"}
 _DYNAMIC_IMPORTS = {"importlib.import_module", "import_module", "__import__"}
 _HOLE = "${}"  # placeholder for parts of a URL that are only known at run time
+_OWN_PACKAGE = "\x00"  # stands for __package__ in a module name built at run time
+_PATTERN_PART = re.compile(r"[\w*]+")  # one part of a module name pattern: "plugins", "*", "unicode*"
 _MODULE_PATH = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")  # "pip._internal.commands.install"
 _QUOTED_MODULE = re.compile(r"""["'][A-Za-z_]\w*\.[A-Za-z_][\w.]*["']""")
 _COLLECTIONS = (ast.Dict, ast.List, ast.Tuple, ast.Set)
@@ -186,12 +188,14 @@ class _Visitor:
         # routers of this file mounted in it: (prefix or None, router, router or app it is mounted on, Flask?)
         self.local_mounts: list[tuple[str | None, str, str, bool]] = []
         self.mount_parents: list[tuple[HttpMount, str]] = []  # mounts of imported routers -> what they are mounted on
-        self.bare_mounts: list[HttpMount] = []  # imported routers mounted on the app without a prefix
         self.bindings: dict[str, tuple] = {}  # local name -> how an import bound it (for mounts)
         self.server_app = False
         self.main_guard = False
         self.module_strings: list[tuple[str, int]] = []  # dotted strings, for import_module(name)
         self.computed_import = False  # import_module() with a name only known at run time
+        # Variables of the loops being visited that run over written strings (for name in ("a", "b")),
+        # and the variables made from them in the loop: name -> the strings it can hold.
+        self.loop_values: dict[str, tuple[str, ...]] = {}
         self.registry: list[tuple[str, int]] = []  # module paths listed in a module-level table
         self.source = text
         self.lines: list[str] | None = None
@@ -207,7 +211,8 @@ class _Visitor:
         self.want_server = "HTTPRequestHandler" in text and "http.server" in text
         self.funcs: list[str] = []  # names of the functions being visited, innermost last
         # string constants for URLs and for module names built at run time
-        self.want_strings = http or self.want_mounts or "import_module" in text or _needs_routes(text)
+        self.want_strings = (http or self.want_mounts or "import_module" in text or "__import__" in text
+                             or _needs_routes(text))
         self.want_exprs = self.want_calls or self.want_dsn or self.want_server
 
     def run(self, tree: ast.Module) -> None:
@@ -299,7 +304,14 @@ class _Visitor:
 
     def visit_For(self, node) -> None:
         self.expr(node.iter)
-        self.block(node.body)
+        values = _literal_strings(node.iter) if self.want_calls and type(node.target) is ast.Name else None
+        if values:  # for name in ("users", "todos"): import_module(f"routes.{name}") loads those two
+            saved = dict(self.loop_values)
+            self.loop_values[node.target.id] = values
+            self.block(node.body)
+            self.loop_values = saved
+        else:
+            self.block(node.body)
         self.block(node.orelse)
 
     def visit_While(self, node: ast.While) -> None:
@@ -380,19 +392,48 @@ class _Visitor:
             self._add_import(ImportRef(spec[level:], [], "dynamic", level, node.lineno))
             return
         self.computed_import = True
-        # import_module(f".unicode{version}", __package__), directly or through a variable: one of the
-        # package's unicode*.py modules (rich's tables, named unicode15-0-0.py and so on)
-        text = self.text(node.args[0])
+        values = self._alternatives(node.args[0]) if self.loop_values else None
+        if values:  # for package in ("urllib3", "idna"): __import__("pip._vendor." + package): those two
+            for value in values:
+                spec = value.strip()
+                level = len(spec) - len(spec.lstrip("."))
+                if spec[level:] and _MODULE_NAME.fullmatch(spec[level:]):
+                    self._add_import(ImportRef(spec[level:], [], "dynamic", level, node.lineno))
+            return
+        # A name built at run time, directly or through a variable, with a written start: a pattern
+        # of the modules it can be (`*` for the part only known when it runs). import_module(
+        # f"pkg.plugins.{name}") or "pkg.plugins." + name -> "pkg.plugins.*"; relative to this
+        # package, import_module(f".unicode{version}", __package__) (rich's unicode15-0-0.py tables)
+        # or f"{__package__}.plugins.{name}" -> "unicode*" or "plugins.*" with level 1.
+        own = {"__package__": _OWN_PACKAGE}
+        if (self.facts.path or "").rsplit("/", 1)[-1] == "__init__.py":
+            own["__name__"] = _OWN_PACKAGE  # in a package's __init__.py, __name__ is the package
+        self.scopes.append(own)
+        try:
+            text = self.text(node.args[0])
+        finally:
+            self.scopes.pop()
         if _HOLE not in text:
             return
-        text = text.split(_HOLE, 1)[0]
-        level = len(text) - len(text.lstrip("."))
-        package = node.args[1] if len(node.args) > 1 else _kw(node, "package")
-        if level and not (isinstance(package, ast.Name) and package.id in ("__package__", "__name__")):
-            return  # relative to a package named some other way
-        module, _, prefix = text[level:].rpartition(".")
-        if prefix and re.fullmatch(r"\w+", prefix) and (not module or _MODULE_NAME.fullmatch(module)):
-            self._add_import(ImportRef(module, [prefix + "*"], "dynamic", level, node.lineno))
+        if text.startswith(_OWN_PACKAGE):
+            if not text.startswith(_OWN_PACKAGE + "."):
+                return  # f"{__package__}{name}": not a module of the package
+            level, text = 1, text[len(_OWN_PACKAGE) + 1:]
+        else:
+            level = len(text) - len(text.lstrip("."))
+            text = text[level:]
+            package = node.args[1] if len(node.args) > 1 else _kw(node, "package")
+            if level and not (isinstance(package, ast.Name) and package.id in ("__package__", "__name__")):
+                return  # relative to a package named some other way
+        pattern = text.replace(_HOLE, "*")
+        parts = pattern.split(".")
+        if _OWN_PACKAGE in pattern or not all(_PATTERN_PART.fullmatch(p) for p in parts):
+            return
+        if not level and "*" in parts[0]:
+            return  # no written package to look in (f"{name}.plugins")
+        if not pattern.replace("*", "").replace(".", ""):
+            return  # "." + name: any module of the package, like import(`./${name}`) in JavaScript
+        self._add_import(ImportRef(pattern, [], "dynamic", level, node.lineno))
 
     def _http_call(self, node: ast.Call) -> None:
         func = node.func
@@ -484,8 +525,10 @@ class _Visitor:
         answer under /api/todos. Flask: app.register_blueprint(bp, url_prefix="/api") answers under
         /api instead of the blueprint's own url_prefix. A router mounted on another router of this
         file (api_bp.register_blueprint(bp)) answers under that router's prefix, even without one.
-        One mounted on the app without a prefix answers at the paths as written: that counts only
-        next to another mount of the same router in this file (under /v1 and as written: both)."""
+        One mounted on the app without a prefix answers at the paths as written: alone that moves
+        nothing, but next to another mount of the same router (in this file or another) it is one of
+        its addresses, so it is recorded too. The mount names the router it takes in the module it
+        imports (`router`): include_router(routes.todos_router) moves only todos_router's routes."""
         func = call.func
         keyword = _MOUNT_PREFIX.get(func.attr) if isinstance(func, ast.Attribute) else None
         router = _dotted(call.args[0]) if call.args else None
@@ -505,15 +548,15 @@ class _Visitor:
         if bound[0] == "from":  # from routes import todos / from routes.todos import router
             _, module, name, level = bound
             target = ImportRef(module, [name], "from", level, call.lineno)
+            names = name + router[len(head):]  # todos.router: a submodule's router, or a router of routes
         else:  # import routes.todos -> routes.todos.router; import routes.todos as t -> t.router
             _, module, aliased = bound
             spec = module if aliased or "." not in router else router.rsplit(".", 1)[0]
             target = ImportRef(spec, [], "import", 0, call.lineno)
-        mount = HttpMount(prefix or "", target, call.lineno, replace=flask and prefix is not None)
+            names = router[len(head) + 1:] if aliased else router[len(spec) + 1:]
+        mount = HttpMount(prefix or "", target, call.lineno, replace=flask and prefix is not None, router=names)
         self.facts.http_mounts.append(mount)
         self.mount_parents.append((mount, parent))  # its base is known once the whole file is read
-        if prefix is None and parent not in self.prefixes:
-            self.bare_mounts.append(mount)
 
     def _place_routers(self) -> None:
         """Routers mounted on a router or the app of this file answer under that mount, and the
@@ -522,65 +565,64 @@ class _Visitor:
         FastAPI joins the prefixes: APIRouter(prefix="/todos") included with prefix="/api" answers
         under /api/todos. Flask: a url_prefix given to register_blueprint takes the place of the
         blueprint's own one, and a blueprint registered on another one answers under its prefix.
+        Every route, and every mount of an imported router, learns the outermost router of this file
+        it answers under (HttpRoute.router, HttpMount.owner): another file that mounts that router by
+        name moves only those.
         """
+        for route, owner, _, _ in self.route_owners:
+            route.router = owner
         if not self.local_mounts and not self.mount_parents:
             return
-        if self.bare_mounts:  # on the app as written: only next to another mount of the same router
-            def key(m: HttpMount) -> tuple:
-                return m.target.spec, tuple(m.target.names), m.target.kind, m.target.level
-
-            bare = {id(m) for m in self.bare_mounts}
-            others = {key(m) for m in self.facts.http_mounts if id(m) not in bare}
-            alone = {id(m) for m in self.bare_mounts if key(m) not in others}
-            self.facts.http_mounts = [m for m in self.facts.http_mounts if id(m) not in alone]
-            self.mount_parents = [(m, parent) for m, parent in self.mount_parents if id(m) not in alone]
         mounts: dict[str, list[tuple[str | None, str, bool]]] = {}  # router -> where it is mounted
         for prefix, router, parent, flask in self.local_mounts:
             mounts.setdefault(router, []).append((prefix, parent, flask))
         for router, places in list(mounts.items()):  # only on the app, as written: nothing moves
             if all(prefix is None and parent not in self.prefixes for prefix, parent, _ in places):
                 del mounts[router]
-        known: dict[tuple[str, int], list[tuple[str, str]]] = {}
+        known: dict[tuple[str, int], list[tuple[str, str, str]]] = {}
 
-        def placed(name: str, trail: frozenset = frozenset()) -> list[tuple[str, str]]:
+        def placed(name: str, trail: frozenset = frozenset()) -> list[tuple[str, str, str]]:
             """(prefix the routes of `name` answer under, own prefix of the router the chain starts
-            from) pairs. The second is what a Flask url_prefix from another file takes the place of.
+            from, that router) triples. The second is what a Flask url_prefix from another file takes
+            the place of, and the third the router of this file another file can mount the chain by.
             Each router is worked out once per depth: routers mounted many times on each other, nine
             deep, would otherwise take minutes."""
             own = self.prefixes.get(name, "")
             if name not in mounts or name in trail or len(trail) > 8:
-                return [(own, own)]
+                return [(own, own, name)]
             key = (name, len(trail))
             if key in known:
                 return known[key]
-            out: list[tuple[str, str]] = []
+            out: list[tuple[str, str, str]] = []
             for prefix, parent, flask in mounts[name]:
-                for outer, top in placed(parent, trail | {name}):
+                for outer, top, root in placed(parent, trail | {name}):
                     if flask:  # register_blueprint(bp, url_prefix=...) stands instead of bp's own url_prefix
-                        out.append((_join_url(outer, own if prefix is None else prefix), top))
+                        out.append((_join_url(outer, own if prefix is None else prefix), top, root))
                     else:  # include_router(router, prefix=...) goes in front of the router's own prefix
-                        out.append((_join_url(_join_url(outer, prefix or ""), own), top))
+                        out.append((_join_url(_join_url(outer, prefix or ""), own), top, root))
             known[key] = result = list(dict.fromkeys(out))[:8]
             return result
 
         for mount, parent in self.mount_parents:
-            (mount.base, mount.base_own), *more = placed(parent)
-            for base, own in more:  # the router it is mounted on is mounted twice (/v1 and /v2): one mount each
-                self.facts.http_mounts.append(HttpMount(mount.prefix, mount.target, mount.line, base, mount.replace, own))
+            (mount.base, mount.base_own, mount.owner), *more = placed(parent)
+            for base, own, root in more:  # the router it is mounted on is mounted twice (/v1 and /v2): one mount each
+                self.facts.http_mounts.append(HttpMount(mount.prefix, mount.target, mount.line, base, mount.replace,
+                                                        own, mount.router, root))
         moved: dict[int, list[HttpRoute]] = {}
         for route, owner, rule, hints in self.route_owners:
             if owner not in mounts:
                 continue
             options = placed(owner)
             rest = strip_http_base(route.path, normalize_http_path(self.prefixes.get(owner, "")) or "")
-            paths: dict[str, HttpRoute] = {}
+            paths: dict[tuple[str, str], HttpRoute] = {}
             shown: list[str] = []  # each address as written, for the hint next to the function
-            for prefix, top in options:
+            for prefix, top, root in options:
                 path = join_http_path(prefix, rest)
                 if not path:
                     continue
-                if path not in paths:
-                    paths[path] = HttpRoute(route.method, path, route.handler, route.line, normalize_http_path(top) or "")
+                if (path, root) not in paths:
+                    paths[(path, root)] = HttpRoute(route.method, path, route.handler, route.line,
+                                                    normalize_http_path(top) or "", root)
                 written = re.sub(r"^(?:\$\{\})+", "", _join_url(prefix, rule)) or path  # unknown prefix: the rest
                 if written not in shown:
                     shown.append(written)
@@ -626,6 +668,14 @@ class _Visitor:
             for target in targets:
                 if isinstance(target, ast.Name):
                     self.scopes[-1][target.id] = self.text(value)
+        if self.loop_values:  # in a loop over written strings: name = "pkg." + item holds one of a few
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            values = self._alternatives(value) if names else None
+            for name in names:
+                if values:
+                    self.loop_values[name] = values
+                else:
+                    self.loop_values.pop(name, None)
 
     def visit_With(self, node: ast.With | ast.AsyncWith) -> None:
         for item in node.items:
@@ -691,6 +741,41 @@ class _Visitor:
         hints = [[m, shown] for m in methods]  # lists: a mount later in the file can change the path
         self.route_owners.extend((route, owner, rule, hints) for route in routes)
         return hints
+
+    def _alternatives(self, node: ast.AST | None, depth: int = 0) -> tuple[str, ...] | None:
+        """The few strings an expression can be in a loop over written strings ("pip._vendor." +
+        package with package in ("urllib3", "idna")), or None when it is not made from such a loop
+        variable (and written strings) only."""
+        found = self._choices(node, depth)
+        return found[0] if found is not None and found[1] else None
+
+    def _choices(self, node: ast.AST | None, depth: int) -> tuple[tuple[str, ...], bool] | None:
+        """(the strings, whether a loop variable is among the parts), or None."""
+        if node is None or depth > 20:
+            return None
+        if isinstance(node, ast.Constant):
+            return ((node.value,), False) if isinstance(node.value, str) else None
+        if isinstance(node, ast.Name):
+            if node.id in self.loop_values:
+                return self.loop_values[node.id], True
+            value = self.lookup(node.id)  # a constant the file wrote
+            return ((value,), False) if value is not None and _HOLE not in value else None
+        if isinstance(node, ast.FormattedValue):
+            return self._choices(node.value, depth + 1) if node.format_spec is None and node.conversion == -1 else None
+        if isinstance(node, ast.JoinedStr):
+            parts = list(node.values)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            parts = [node.left, node.right]
+        else:
+            return None
+        out, looped = ("",), False
+        for part in parts:
+            found = self._choices(part, depth + 1)
+            if found is None or len(out) * len(found[0]) > 20:
+                return None
+            out = tuple(a + b for a in out for b in found[0])
+            looped = looped or found[1]
+        return tuple(dict.fromkeys(out)), looped
 
     # strings
     def text(self, node: ast.expr) -> str:
@@ -781,16 +866,18 @@ def _symbols(tree: ast.Module, handler_routes: dict) -> list[Symbol]:
     out: list[Symbol] = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            kind, signature = "function", _signature(node)
+            kind, signature, bases = "function", _signature(node), ()
             hint = _route_hint(handler_routes.get(node, []))
         elif isinstance(node, ast.ClassDef):
             kind, signature = "class", f"class {node.name}"
-            hint = HINT_DATA if any(_last_name(base) in _DATA_BASES for base in node.bases) else ""
+            # describe lists the error classes (class X(OSError)) after the file's other public names
+            bases = tuple(name for name in map(_last_name, node.bases) if name)
+            hint = HINT_DATA if any(name in _DATA_BASES for name in bases) else ""
         else:
             continue
         exported = node.name in public if public is not None else not node.name.startswith("_")
         doc = _doc_summary(ast.get_docstring(node))
-        out.append(Symbol(node.name, kind, signature, doc, hint, node.lineno, exported))
+        out.append(Symbol(node.name, kind, signature, doc, hint, node.lineno, exported, bases))
     return out
 
 
@@ -844,6 +931,14 @@ def _literal(node: ast.AST | None) -> str | None:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
+def _literal_strings(node: ast.AST | None) -> tuple[str, ...] | None:
+    """The strings of a written tuple, list or set of them, ("urllib3", "idna"), else None."""
+    if not isinstance(node, (ast.Tuple, ast.List, ast.Set)) or not node.elts or len(node.elts) > 50:
+        return None
+    values = [_literal(item) for item in node.elts]
+    return tuple(values) if all(v is not None for v in values) else None
+
+
 def _kw(call: ast.Call, name: str) -> ast.expr | None:
     return next((k.value for k in call.keywords if k.arg == name), None)
 
@@ -877,7 +972,7 @@ def _last_name(node: ast.expr) -> str:
 
 
 def _framework_of(imp: ImportRef) -> str | None:
-    if imp.level or not imp.spec:
+    if imp.level or not imp.spec or "*" in imp.spec:  # a pattern: which module is not known
         return None
     if imp.spec == "http.server" or (imp.spec == "http" and "server" in imp.names):  # the standard library's
         return "http.server"
@@ -1097,7 +1192,8 @@ def _summary_text(text: str, own: str) -> str:
 
 _RE_IMPORT = re.compile(r"^[ \t]*import[ \t]+([^\n#;]+)", re.M)
 _RE_FROM = re.compile(r"^[ \t]*from[ \t]+(\.*)[ \t]*([\w.]*)[ \t]+import[ \t]+([^\n#;]+)", re.M)
-_RE_DYNAMIC = re.compile(r"""(?:\bimport_module|\b__import__)\(\s*["']([.\w]+)["']""")
+_RE_DYNAMIC = re.compile(
+    r"""(?:\bimport_module|\b__import__)\(\s*(?:["']([.\w]+)["'](\s*\+)?|f["']([.\w]+)\{)""")
 _RE_MAIN = re.compile(r"""^if\s+__name__\s*==\s*["']__main__["']\s*:""", re.M)
 _RE_SERVER = re.compile(
     r"^[A-Za-z_]\w*[ \t]*(?::[^=\n]*)?=[ \t]*(?:[A-Za-z_]\w*\.)*(?:%s)[ \t]*\(" % "|".join(sorted(_APP_FACTORIES)),
@@ -1123,8 +1219,13 @@ def _fill_from_text(facts: FileFacts, text: str) -> None:
             part += text[m.end(): close if close != -1 else None]
         imports.append(ImportRef(m.group(2), _split_names(part), "from", len(m.group(1)), line_of(m.start())))
     for m in _RE_DYNAMIC.finditer(text):
-        spec = m.group(1)
+        spec = m.group(1) or m.group(3)
         level = len(spec) - len(spec.lstrip("."))
+        if m.group(2) or m.group(3):  # "pkg.plugins." + name, f"pkg.plugins.{name}": a pattern
+            spec = spec + "*"
+            parts = spec.split(".")
+            if level or "*" in parts[0] or not all(_PATTERN_PART.fullmatch(p) for p in parts):
+                continue  # relative, or no written package: left to the full analysis
         imports.append(ImportRef(spec[level:], [], "dynamic", level, line_of(m.start())))
     imports.sort(key=lambda imp: imp.line)
 
@@ -1177,13 +1278,13 @@ def _cache(index: ProjectIndex) -> dict:
 
 def resolve(imp: ImportRef, importer: str, index: ProjectIndex) -> list[str]:
     """Project files an import points to; [] for the standard library and outside packages."""
+    if "*" in (imp.spec or ""):  # import_module(f"pkg.plugins.{name}"): every module it can be
+        return _resolve_pattern(imp, importer, index)
     parts = [p for p in (imp.spec or "").split(".") if p]
     if imp.level > 0:
-        base = parent_dir(importer)
-        for _ in range(imp.level - 1):
-            if not base:
-                return []  # climbs above the project root
-            base = parent_dir(base)
+        base = _package_folder(importer, imp.level)
+        if base is None:
+            return []  # climbs above the project root
         found = _find_module(index, [base], parts)
     elif parts:
         if parts == ["__main__"]:
@@ -1199,8 +1300,6 @@ def resolve(imp: ImportRef, importer: str, index: ProjectIndex) -> list[str]:
     kind, path = found
     if kind == "file":
         out = [path]
-    elif imp.kind == "dynamic" and imp.names and all(n.endswith("*") for n in imp.names):
-        out = [f for n in imp.names for f in _submodules_like(index, path, n[:-1])]  # import_module(f".x{v}")
     else:
         names = imp.names if imp.kind == "from" else []
         out = [f for f in (_submodule_file(index, path, name) for name in names) if f]
@@ -1208,6 +1307,78 @@ def resolve(imp: ImportRef, importer: str, index: ProjectIndex) -> list[str]:
         if kind == "package" and len(out) < max(len(names), 1):
             out.append(join_rel(path, "__init__.py"))
     return [p for p in dict.fromkeys(out) if p != importer]
+
+
+def _package_folder(importer: str, level: int) -> str | None:
+    """The folder a relative import of this level starts from (None above the project root)."""
+    base = parent_dir(importer)
+    for _ in range(level - 1):
+        if not base:
+            return None
+        base = parent_dir(base)
+    return base
+
+
+def _resolve_pattern(imp: ImportRef, importer: str, index: ProjectIndex) -> list[str]:
+    """Modules a module name pattern matches ("pkg.plugins.*", "unicode*" relative to the package):
+    `*` is part of one module name. Its package is the written start of the pattern, found like any
+    import; the matches are x.py modules and x/__init__.py packages, sorted."""
+    parts = imp.spec.split(".")
+    k = 0
+    while k < len(parts) and "*" not in parts[k]:
+        k += 1
+    static, rest = parts[:k], parts[k:]
+    if imp.level > 0:
+        base = _package_folder(importer, imp.level)
+        found = None if base is None else _find_module(index, [base], static) if static else ("package", base)
+    elif static:
+        found = _find_absolute(index, parent_dir(importer), static)
+    else:
+        return []  # no written package to look in
+    if found is None or found[0] == "file" or not rest:
+        return []
+    folders, out = [found[1]], []
+    for i, part in enumerate(rest):
+        name = re.compile("[^/.]*".join(re.escape(p) for p in part.split("*")))
+        last = i == len(rest) - 1
+        deeper = []
+        for folder in folders:
+            for module, rel, kind in _modules_in(index, folder):
+                if module != "__main__" and name.fullmatch(module):  # a package's __main__ is run, not loaded
+                    if last and kind != "folder":
+                        out.append(rel)
+                    elif not last and kind != "module":
+                        deeper.append(join_rel(folder, module))
+        folders = list(dict.fromkeys(deeper))
+    return sorted((p for p in dict.fromkeys(out) if p != importer), key=lambda p: (p.lower(), p))
+
+
+def _modules_in(index: ProjectIndex, folder: str) -> list[tuple[str, str, str]]:
+    """(name, path, kind) of what a package folder holds: "module" x.py, "package" x/__init__.py (the
+    path is that file), and "folder" x/ with no __init__.py (a namespace package: no file of its own)."""
+    cache = _cache(index)
+    modules = cache.get("modules")
+    if modules is None:
+        modules = {}
+        packages = set()
+        for rel in index.files:
+            if not rel.endswith(".py"):
+                continue
+            where, _, name = rel.rpartition("/")
+            if name != "__init__.py":
+                modules.setdefault(where, []).append((name[:-3], rel, "module"))
+            elif where:  # a package is a module of the folder above it
+                packages.add(where)
+                parent, _, package = where.rpartition("/")
+                modules.setdefault(parent, []).append((package, rel, "package"))
+        for rel in index.dirs:
+            if rel and rel not in packages:
+                parent, _, name = rel.rpartition("/")
+                modules.setdefault(parent, []).append((name, rel, "folder"))
+        for found in modules.values():
+            found.sort(key=lambda m: m[1])
+        cache["modules"] = modules
+    return modules.get(folder, [])
 
 
 def _find_absolute(index: ProjectIndex, folder: str, parts: list[str]) -> tuple[str, str] | None:
@@ -1270,27 +1441,6 @@ def _find_module(index: ProjectIndex, bases: list[str], parts: list[str]) -> tup
         if namespace is None and index.is_dir(path):
             namespace = ("namespace", path)
     return namespace
-
-
-def _submodules_like(index: ProjectIndex, folder: str, prefix: str) -> list[str]:
-    """Modules of a package whose names start with prefix: unicode*.py and unicode*/__init__.py."""
-    cache = _cache(index)
-    if "children" not in cache:
-        children: dict[str, list[str]] = {}  # folder -> its modules: x.py files and x/__init__.py packages
-        for rel in index.files:
-            if rel.endswith(".py"):
-                children.setdefault(parent_dir(rel), []).append(rel)
-                if rel.endswith("/__init__.py"):
-                    children.setdefault(parent_dir(parent_dir(rel)), []).append(rel)
-        cache["children"] = children
-    out = []
-    for rel in sorted(cache["children"].get(folder, [])):
-        name = rel[len(folder) + 1:] if folder else rel
-        head = name.split("/", 1)[0]
-        stem = head[:-3] if head.endswith(".py") else head
-        if stem.startswith(prefix) and stem != "__init__":
-            out.append(rel)
-    return out
 
 
 def _submodule_file(index: ProjectIndex, folder: str, name: str) -> str | None:

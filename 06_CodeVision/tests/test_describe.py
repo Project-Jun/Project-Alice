@@ -330,3 +330,191 @@ def test_join_wrapped_looks_at_each_line_once(monkeypatch):
 ])
 def test_join_wrapped(lines, joined):
     assert describe.join_wrapped(lines) == joined
+
+
+# ---------------------------------------------------------------- Vue and Svelte files, framework files (2026-11-20)
+
+@pytest.mark.parametrize("rel, s, d", [
+    ("src/components/TodoItem.vue", "Vue 화면 조각", "화면의 한 부분(TodoItem)을 그리는 Vue 코드예요."),
+    ("src/lib/Counter.svelte", "Svelte 화면 조각", "화면의 한 부분(Counter)을 그리는 Svelte 코드예요."),
+    ("src/components/DatePicker/index.vue", "Vue 화면 조각", "화면의 한 부분(DatePicker)을 그리는 Vue 코드예요."),
+    ("src/App.vue", "화면 전체 틀", "화면 조각들을 모아 전체 화면을 짜는 뼈대예요. Vue로 만들었어요."),
+    ("pages/todos/[id].vue", "화면 페이지", "주소마다 보이는 화면 한 페이지예요. Vue로 만들었어요."),
+    ("src/routes/+page.svelte", "화면 페이지", "주소마다 보이는 화면 한 페이지예요. Svelte로 만들었어요."),
+    ("layouts/default.vue", "화면 배치 틀", "여러 페이지가 같이 쓰는 화면 배치를 정해요. Vue로 만들었어요."),
+    ("src/routes/admin/+layout@.svelte", "화면 배치 틀",
+     "여러 페이지가 같이 쓰는 화면 배치를 정해요. Svelte로 만들었어요."),
+    ("error.vue", "오류 화면", "문제가 생겼을 때 대신 보여 주는 화면이에요. Vue로 만들었어요."),
+    # Nuxt 4 keeps the app in app/ (2026-11-21: its error.vue was "화면의 한 부분(error)")
+    ("app/error.vue", "오류 화면", "문제가 생겼을 때 대신 보여 주는 화면이에요. Vue로 만들었어요."),
+    ("components/Error.vue", "Vue 화면 조각", "화면의 한 부분(Error)을 그리는 Vue 코드예요."),
+    ("src/routes/+error.svelte", "오류 화면", "문제가 생겼을 때 대신 보여 주는 화면이에요. Svelte로 만들었어요."),
+])
+def test_vue_and_svelte_files_are_screen_parts_named_after_the_component(rel, s, d):
+    ff = facts(rel, fn("load"), language="typescript")
+    assert describe.describe_file(rel, ff, area="ui", used_by=1) == (s, d + " 1개 파일이 이 파일을 써요.")
+    # not analyzed (no JavaScript analyzer): still the framework's screen part
+    assert describe.describe_file("src/A.svelte", None, area="ui")[0] == "Svelte 화면 조각"
+
+
+def test_a_file_a_framework_loads_says_so():
+    ff = facts("components/AppHeader.vue", language="javascript")
+    note = "Nuxt가 화면에 쓰인 이름을 보고 알아서 불러와요."
+    assert describe.describe_file("components/AppHeader.vue", ff, area="ui", loaded=note) == (
+        "Vue 화면 조각", "화면의 한 부분(AppHeader)을 그리는 Vue 코드예요. " + note)  # not "직접 이어져 있지 않아요"
+    assert describe.describe_file("components/AppHeader.vue", ff, area="ui", loaded=note, uses=2)[1].endswith(
+        note + " 다른 파일 2개를 불러 써요.")
+    # a start point says why it starts instead
+    assert describe.describe_file("app.vue", facts("app.vue", language="javascript"), area="ui", entry=True,
+                                  entry_reason="Nuxt가 처음 띄우는 화면", loaded="Nuxt가 알아서 불러와요.") == (
+        "화면 시작점", "실행하면 여기서부터 시작돼요(Nuxt가 처음 띄우는 화면).")
+
+
+@pytest.mark.parametrize("rel, ff, s", [
+    ("src/routes/+page.ts", facts("src/routes/+page.ts", fn("load"), language="typescript"), "페이지 데이터 준비"),
+    ("src/hooks.server.ts", facts("src/hooks.server.ts", fn("handle"), language="typescript"), "요청 중간 처리"),
+    ("composables/useTodos.ts", facts("composables/useTodos.ts", fn("useTodos"), language="typescript"),
+     "화면 동작 도우미(훅)"),
+])
+def test_framework_code_files_get_their_own_roles(rel, ff, s):
+    got_s, got_d = describe.describe_file(rel, ff, area="ui", used_by=1)
+    assert got_s == s and "React" not in got_d
+    server = describe.describe_file("src/routes/x/+page.server.ts", facts("src/routes/x/+page.server.ts",
+                                                                          language="typescript"), area="ui", used_by=1)
+    assert server[1].startswith("화면에 보여 줄 데이터를 서버에서 미리 불러오는 코드예요.")
+    react = facts("src/hooks/useTodos.js", fn("useTodos"), language="javascript")
+    assert "React 훅" in describe.describe_file("src/hooks/useTodos.js", react, area="ui", used_by=1)[1]
+
+
+def test_stack_names_for_nuxt_and_sveltekit():
+    assert [describe.UI_FRAMEWORKS[k] for k in ("vue", "nuxt", "svelte", "sveltekit")] == [
+        "Vue", "Nuxt", "Svelte", "SvelteKit"]
+    assert list(describe.UI_FRAMEWORKS).index("nuxt") > list(describe.UI_FRAMEWORKS).index("vue")
+
+
+# ---------------------------------------------------------------- the main names before the error classes (2026-11-21)
+
+def err(name, *bases, doc="", exported=True):
+    return Symbol(name, "class", f"class {name}", doc=doc, exported=exported, bases=bases)
+
+
+def listed(ff):
+    return [f[0] for f in describe.functions(ff)]
+
+
+def smtplib_symbols():
+    """smtplib.py of the standard library: ten error classes (three named only by what they are made
+    from), then what the module is for. LMTP is not in __all__, but has no leading underscore either."""
+    return (
+        err("SMTPException", "OSError"), err("SMTPNotSupportedError", "SMTPException"),
+        err("SMTPServerDisconnected", "SMTPException"), err("SMTPResponseException", "SMTPException"),
+        err("SMTPSenderRefused", "SMTPResponseException"), err("SMTPRecipientsRefused", "SMTPException"),
+        err("SMTPDataError", "SMTPResponseException"), err("SMTPConnectError", "SMTPResponseException"),
+        err("SMTPHeloError", "SMTPResponseException"), err("SMTPAuthenticationError", "SMTPResponseException"),
+        fn("quoteaddr", exported=True), fn("_addr_only"), fn("quotedata", exported=True), fn("_quote_periods"),
+        fn("_fix_eols"), cls("SMTP", "This class manages a connection to an SMTP or ESMTP server.", exported=True),
+        cls("LMTP"),
+    )
+
+
+def test_the_main_names_come_before_the_error_classes():
+    # 2026-11-21: the panel took the public names in source order, so smtplib.py listed eight of its error
+    # classes and never class SMTP, and the AI was asked about those eight only
+    assert listed(facts("smtplib.py", *smtplib_symbols())) == [
+        "quoteaddr()", "quotedata()", "class SMTP", "class LMTP",
+        "class SMTPException", "class SMTPNotSupportedError", "class SMTPServerDisconnected",
+        "class SMTPResponseException"]
+    # by name alone, in Python and JavaScript alike
+    loader = facts("loader.py", cls("ConfigError", exported=True), cls("ParseWarning", exported=True),
+                   cls("LoadException", exported=True), fn("load", exported=True), cls("Loader", exported=True))
+    assert listed(loader) == ["load()", "class Loader", "class ConfigError", "class ParseWarning", "class LoadException"]
+    api = facts("src/api.ts", cls("ApiError", exported=True), fn("getTodos", exported=True), language="typescript")
+    assert listed(api) == ["getTodos()", "class ApiError"]
+
+
+def test_error_classes_are_known_by_what_they_are_made_from():
+    # one of Python's own, whose names do not say so; one named so in another module (errors.SendError is
+    # recorded as "SendError"); one defined earlier in this file. A plain name from another module
+    # (Rejected) and other bases say nothing.
+    ftp = facts("ftp.py", err("Interrupted", "KeyboardInterrupt"), err("Finished", "StopIteration"),
+                err("Refused", "SendError"), err("error_temp", "Refused"), err("Session", "Base"),
+                err("Bounced", "Rejected"), cls("FTP", exported=True))
+    assert listed(ftp) == ["class Session", "class Bounced", "class FTP", "class Interrupted", "class Finished",
+                           "class Refused", "class error_temp"]
+
+
+def test_error_classes_still_come_before_the_private_helpers():
+    ff = facts("tool.py", fn("_warn", "Warn once."), err("_Stop", "Exception", exported=False), fn("_check"),
+               cls("ToolError", exported=True), cls("_Helper"), cls("Tool", exported=True))
+    assert listed(ff) == ["class Tool", "class ToolError", "_warn()", "class _Stop", "class _Helper", "_check()"]
+    # only the room left: eight main names leave none for the errors
+    many = facts("big.py", cls("BigError", exported=True), *(fn(f"run{i}", exported=True) for i in range(9)))
+    assert "class BigError" not in listed(many) and len(listed(many)) == 8
+
+
+def test_a_module_of_error_classes_still_lists_them_in_source_order():
+    click = facts("click/exceptions.py", fn("_join_param_hints", "Join the hints."),
+                  err("ClickException", "Exception"), err("UsageError", "ClickException"),
+                  err("BadParameter", "UsageError"), err("Abort", "RuntimeError"), err("Exit", "RuntimeError"))
+    assert listed(click) == ["class ClickException", "class UsageError", "class BadParameter", "class Abort",
+                             "class Exit", "_join_param_hints()"]
+
+
+def test_what_is_no_error_class_keeps_its_place():
+    # "Exc" is no ending here (pytest's RaisesExc matches errors), and functions, screen parts and
+    # classes made from other classes are no error classes
+    ff = facts("x.py", cls("RaisesExc", exported=True), fn("handle_error", exported=True),
+               Symbol("FieldError", "component", "FieldError({ error })", exported=True),
+               err("Mapping", "Generic"), fn("raises", exported=True))
+    assert listed(ff) == ["class RaisesExc", "handle_error()", "FieldError({ error })", "class Mapping", "raises()"]
+
+
+def test_a_built_graph_lists_the_main_class_before_the_errors(tmp_path):
+    (tmp_path / "mailer.py").write_text(
+        '"""Send mail."""\nimport errors\n\n\n'
+        "class MailError(OSError):\n    pass\n\n\n"
+        "class Disconnected(MailError):\n    pass\n\n\n"
+        "class Cancelled(KeyboardInterrupt):\n    pass\n\n\n"
+        "class Refused(errors.SendError):\n    pass\n\n\n"
+        "def quote(addr):\n    return addr\n\n\n"
+        "class Mailer:\n    \"\"\"Talks to a mail server.\"\"\"\n", encoding="utf-8")
+    f = build(str(tmp_path))["nodes"]["mailer.py"]["f"]
+    assert f == [["quote(addr)", ""], ["class Mailer", "Talks to a mail server."], ["class MailError", ""],
+                 ["class Disconnected", ""], ["class Cancelled", ""], ["class Refused", ""]]
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_javascript_error_classes_come_after_the_rest(tmp_path, monkeypatch, tree_sitter):
+    from codevision.lang import js_lang
+
+    if tree_sitter and not js_lang.TREE_SITTER:
+        pytest.skip("tree-sitter is not installed")
+    monkeypatch.setattr(js_lang, "TREE_SITTER", tree_sitter)
+    (tmp_path / "api.ts").write_text(
+        "export class ApiError extends Error {}\n"
+        "export class TodoClient {}\n"
+        "export function getTodos() {\n  return fetch('/api/todos');\n}\n", encoding="utf-8")
+    f = build(str(tmp_path))["nodes"]["api.ts"]["f"]
+    assert [sig for sig, _ in f] == ["class TodoClient", "getTodos()", "class ApiError"]
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_javascript_classes_made_from_error_classes_come_after_the_rest(tmp_path, monkeypatch, tree_sitter):
+    # 2026-11-21: JavaScript classes were known by their names alone, so class NotFound extends HttpError
+    # stayed among the main names. Now as in Python: what they extend (Problem is one by Error, so Gone is one).
+    from codevision.lang import js_lang
+
+    if tree_sitter and not js_lang.TREE_SITTER:
+        pytest.skip("tree-sitter is not installed")
+    monkeypatch.setattr(js_lang, "TREE_SITTER", tree_sitter)
+    (tmp_path / "errors.ts").write_text(
+        "export class HttpError extends Error {}\n"
+        "export class NotFound extends HttpError {}\n"
+        "export class Problem extends Error {}\n"
+        "export class Gone extends Problem {}\n"
+        "export class Unauthorized extends errors.ApiError {}\n"
+        "export class Api extends Base {}\n"
+        "export function get(path: string) {\n  return fetch(path);\n}\n", encoding="utf-8")
+    f = build(str(tmp_path))["nodes"]["errors.ts"]["f"]
+    assert [sig for sig, _ in f] == ["class Api", "get(path: string)", "class HttpError", "class NotFound",
+                                     "class Problem", "class Gone", "class Unauthorized"]

@@ -622,6 +622,152 @@ def test_express_mounts_chain_through_routers(tmp_path):
     assert nodes["web/main.js"]["h"] == ["api/todos.js"]  # /api + /todos + /:id
 
 
+# ---------------------------------------------------------------- JS routers placed in their own file (2026-11-20)
+
+def real_js(monkeypatch, tree_sitter):
+    from codevision.lang import js_lang
+
+    if tree_sitter and not js_lang.TREE_SITTER:
+        pytest.skip("tree-sitter is not installed")
+    monkeypatch.setattr(js_lang, "TREE_SITTER", tree_sitter)
+
+
+TODOS_JS = ("const express = require('express');\nconst router = express.Router();\n"
+            "router.get('/', (req, res) => res.json([]));\nrouter.delete('/:id', (req, res) => res.json({}));\n"
+            "module.exports = router;\n")
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_a_js_router_mounted_on_a_router_of_its_file_gets_the_full_address(tmp_path, monkeypatch, tree_sitter):
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        "server/index.js": "const express = require('express');\nconst todos = require('./routes/todos');\n"
+                           "const app = express();\nconst api = express.Router();\napi.use('/todos', todos);\n"
+                           "app.use('/api', api);\napp.listen(3000);\n",
+        "server/routes/todos.js": TODOS_JS,
+        "client/api.js": "export const list = () => fetch('/api/todos');\n"
+                         "export const del = (id) => fetch(`/api/todos/${id}`, {method: 'DELETE'});\n",
+        "client/old.js": "export const legacy = () => fetch('/todos');\n",
+    })["nodes"]
+    todos = nodes["server/routes/todos.js"]
+    assert todos["d"].startswith("/api/todos 주소로 오는 조회·삭제 요청을 처리해요.")  # /todos before
+    assert todos["h"] == ["client/api.js"] and todos["b"] == ["client/api.js", "server/index.js"]
+    assert nodes["client/old.js"]["h"] == nodes["client/old.js"]["u"] == []  # /todos alone is not its address
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_js_routers_on_two_routers_of_a_file_each_get_their_own_address(tmp_path, monkeypatch, tree_sitter):
+    # 2026-11-21: the router mounted on the second router of the file (admin) answered as written
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        "server/index.js": "const express = require('express');\nconst todos = require('./routes/todos');\n"
+                           "const users = require('./routes/users');\nconst app = express();\n"
+                           "const api = express.Router();\nconst admin = express.Router();\napp.use('/api', api);\n"
+                           "app.use('/admin', admin);\napi.use('/todos', todos);\nadmin.use('/users', users);\n"
+                           "app.listen(3000);\n",
+        "server/routes/todos.js": TODOS_JS,
+        "server/routes/users.js": TODOS_JS,
+        "client/api.js": "export const users = () => fetch('/admin/users');\n",
+        "client/old.js": "export const users = () => fetch('/users');\n",
+    })["nodes"]
+    users = nodes["server/routes/users.js"]
+    assert users["d"].startswith("/admin/users 주소로 오는 조회·삭제 요청을 처리해요.")
+    assert users["h"] == ["client/api.js"] and nodes["client/old.js"]["h"] == []
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+@pytest.mark.parametrize("rel, server", [
+    ("server/app.js", "const express = require('express');\nconst app = express();\nconst api = express.Router();\n"
+                      "const todos = express.Router();\ntodos.get('/', list);\napi.use('/todos', todos);\n"
+                      "app.use('/api', api);\nmodule.exports = app;\n"),
+    ("server/routes.js", "const Router = require('@koa/router');\nconst api = new Router({ prefix: '/api' });\n"
+                         "const todos = new Router();\ntodos.get('/', list);\n"
+                         "api.use('/todos', todos.routes(), todos.allowedMethods());\nmodule.exports = api;\n"),
+    ("server/app.ts", "import { Hono } from 'hono';\nconst api = new Hono().basePath('/api');\nconst todos = new Hono();\n"
+                      "todos.get('/', (c) => c.json([]));\napi.route('/todos', todos);\nexport default api;\n"),
+    ("server/app.js", "const fastify = require('fastify')();\nasync function todos(app) {\n  app.get('/', list);\n}\n"
+                      "async function api(app) {\n  app.register(todos, { prefix: '/todos' });\n}\n"
+                      "fastify.register(api, { prefix: '/api' });\nmodule.exports = fastify;\n"),
+], ids=["express", "koa", "hono", "fastify"])
+def test_routers_of_one_file_placed_on_each_other_answer_at_the_full_address(tmp_path, monkeypatch, tree_sitter,
+                                                                           rel, server):
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        rel: server,
+        "web/api.js": "export const list = () => fetch('/api/todos');\n",
+        "web/short.js": "export const list = () => fetch('/todos');\n",
+    })["nodes"]
+    assert nodes[rel]["d"].startswith("/api/todos 주소로 오는 조회 요청을 처리해요.")
+    assert nodes[rel]["h"] == ["web/api.js"] and nodes["web/short.js"]["h"] == []
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_a_js_router_on_a_router_placed_twice_answers_at_both(tmp_path, monkeypatch, tree_sitter):
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        "server/index.js": "const express = require('express');\nconst todos = require('./routes/todos');\n"
+                           "const app = express();\nconst api = express.Router();\napi.use('/todos', todos);\n"
+                           "app.use('/v1', api);\napp.use('/v2', api);\n",
+        "server/routes/todos.js": TODOS_JS,
+        "web/v2.js": "export const del = (id) => fetch(`/v2/todos/${id}`, {method: 'DELETE'});\n",
+    })["nodes"]
+    todos = nodes["server/routes/todos.js"]
+    assert todos["d"].startswith("/v1/todos, /v2/todos 주소로 오는 조회·삭제 요청을 처리해요.")  # /todos before
+    assert todos["h"] == ["web/v2.js"]
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_a_js_router_mounted_with_and_without_a_prefix_answers_at_both(tmp_path, monkeypatch, tree_sitter):
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        "server/index.js": "const express = require('express');\nconst todos = require('./routes/todos');\n"
+                           "const app = express();\napp.use('/v1', todos);\napp.use(todos);\n",
+        "server/routes/todos.js": "const express = require('express');\nconst router = express.Router();\n"
+                                  "router.get('/todos', (req, res) => res.json([]));\nmodule.exports = router;\n",
+        "web/plain.js": "export const list = () => fetch('/todos');\n",
+    })["nodes"]
+    todos = nodes["server/routes/todos.js"]
+    assert todos["d"].startswith("/v1/todos, /todos 주소로 오는 조회 요청을 처리해요.")
+    assert todos["h"] == ["web/plain.js"]  # the address as written was missed before
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_a_js_router_mounted_with_no_path_on_a_router_another_file_mounts_gets_the_full_address(
+        tmp_path, monkeypatch, tree_sitter):
+    # routes/index.js gathers routers with router.use(auth); app.js mounts it under /api
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        "server/routes/index.js": "const express = require('express');\nconst auth = require('./auth');\n"
+                                  "const router = express.Router();\nrouter.use(auth);\nmodule.exports = router;\n",
+        "server/routes/auth.js": "const express = require('express');\nconst router = express.Router();\n"
+                                 "router.post('/login', (req, res) => res.json({}));\nmodule.exports = router;\n",
+        "server/app.js": "const express = require('express');\nconst routes = require('./routes');\n"
+                         "const app = express();\napp.use('/api', routes);\nmodule.exports = app;\n",
+        "web/login.js": "export const login = () => fetch('/api/login', {method: 'POST'});\n",
+        "web/short.js": "export const login = () => fetch('/login', {method: 'POST'});\n",
+    })["nodes"]
+    auth = nodes["server/routes/auth.js"]
+    assert auth["d"].startswith("/api/login 주소로 오는 추가 요청을 처리해요.")  # /login before
+    assert auth["h"] == ["web/login.js"] and nodes["web/short.js"]["h"] == []
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_request_hints_of_a_mounted_js_route_file_keep_the_address_they_call(tmp_path, monkeypatch, tree_sitter):
+    # a JS function hint is the request it sends (GET · /upstream/list), not an address of this server
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        "server/app.js": "const express = require('express');\nconst todos = require('./routes/todos');\n"
+                         "const app = express();\napp.use('/api/todos', todos);\nmodule.exports = app;\n",
+        "server/routes/todos.js": "const express = require('express');\nconst router = express.Router();\n"
+                                  "async function upstream() {\n  return fetch('http://other.example/upstream/list');\n}\n"
+                                  "router.get('/', async (req, res) => res.json(await upstream()));\n"
+                                  "module.exports = router;\n",
+    })["nodes"]
+    todos = nodes["server/routes/todos.js"]
+    assert todos["d"].startswith("/api/todos 주소로 오는 조회 요청을 처리해요.")
+    assert todos["f"] == [["upstream()", "GET · /upstream/list"]]  # was GET · /api/todos/upstream/list
+
+
 @pytest.mark.parametrize("main", [
     "from fastapi import FastAPI\nfrom routes import todos\napp = FastAPI()\n"
     "app.include_router(todos.router, prefix='/api/todos')\n",
@@ -998,6 +1144,438 @@ def test_functions_list_the_public_face_first():
     assert [f[0] for f in describe.functions(facts)] == [
         "class InstallCommand", "decide(a)", "_warn(module)", "class _Helper", "_check(module)"]
     assert [f[0] for f in describe.functions(facts, limit=2)] == ["class InstallCommand", "decide(a)"]
+
+
+# ---------------------------------------------------------------- Vue and Svelte apps (2026-11-20)
+
+VUE_APP = {
+    "web/package.json": '{"dependencies": {"vue": "^3.4.0", "vue-router": "^4"}}',
+    "web/index.html": '<div id="app"></div>\n<script type="module" src="/src/main.ts"></script>\n',
+    "web/src/main.ts": "import { createApp } from 'vue';\nimport App from './App.vue';\nimport router from './router';\n"
+                       "createApp(App).use(router).mount('#app');\n",
+    "web/src/App.vue": '<template>\n  <RouterView />\n  <TodoList />\n</template>\n\n<script setup lang="ts">\n'
+                       "import TodoList from './components/TodoList.vue'\n</script>\n",
+    "web/src/router/index.ts": "import { createRouter } from 'vue-router';\nimport Home from '../views/Home.vue';\n"
+                               "export default createRouter({ routes: [{ path: '/', component: Home },\n"
+                               "  { path: '/about', component: () => import('../views/About.vue') }] });\n",
+    "web/src/views/Home.vue": "<template><h1>Home</h1></template>\n",
+    "web/src/views/About.vue": "<template><h1>About</h1></template>\n",
+    "web/src/components/TodoList.vue": (
+        '<!-- <script>import Old from "./Old.vue"</script> -->\n<template>\n'
+        "  <li v-for=\"t in todos\" :title=\"'<script>'\">{{ t.title }}</li>\n  <TodoItem />\n</template>\n"
+        "<script setup>\nimport { ref } from 'vue'\nimport TodoItem from './TodoItem'\n"
+        "const todos = ref([])\nasync function load() {\n  todos.value = await (await fetch('/api/todos')).json()\n}\n"
+        "</script>\n<style scoped>li { color: red }</style>\n"),
+    "web/src/components/TodoItem.vue": "<script>\nexport default { props: ['todo'] }\n</script>\n"
+                                       "<template><li>{{ todo }}</li></template>\n",
+    "web/src/components/Old.vue": "<template><p>nobody uses me</p></template>\n",
+    "server/package.json": '{"dependencies": {"express": "^4"}}',
+    "server/index.js": "const express = require('express');\nconst app = express();\n"
+                       "app.get('/api/todos', (req, res) => res.json([]));\napp.listen(3000);\n",
+}
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_a_vue_app_is_linked_and_described(tmp_path, monkeypatch, tree_sitter):
+    real_js(monkeypatch, tree_sitter)
+    graph = write_real(tmp_path, VUE_APP)
+    check_consistency(graph)
+    nodes = graph["nodes"]
+    assert graph["stack"][0] == {"area": "ui", "label": "화면", "tech": "Vue"}
+    assert nodes["web/src/main.ts"]["u"] == ["web/src/App.vue", "web/src/router/index.ts"]
+    assert nodes["web/src/App.vue"]["u"] == ["web/src/components/TodoList.vue"]  # .vue -> .vue
+    # with and without the extension; the import in the template's comment is not one
+    assert nodes["web/src/components/TodoList.vue"]["u"] == ["server/index.js", "web/src/components/TodoItem.vue"]
+    assert nodes["web/src/components/TodoList.vue"]["h"] == ["server/index.js"]  # fetch in the script block
+    assert nodes["web/src/router/index.ts"]["u"] == ["web/src/views/About.vue", "web/src/views/Home.vue"]
+    assert {k for k, v in nodes.items() if v.get("o")} == {"web/src/components/Old.vue"}
+    for rel in ("web/src/App.vue", "web/src/components/TodoItem.vue", "web/src/views/Home.vue"):
+        assert nodes[rel]["a"] == "ui" and nodes[rel]["lang"] in ("javascript", "typescript")
+    assert nodes["web/src/App.vue"]["lang"] == "typescript"  # <script setup lang="ts">
+    item = nodes["web/src/components/TodoItem.vue"]
+    assert (item["s"], item["d"]) == ("Vue 화면 조각", "화면의 한 부분(TodoItem)을 그리는 Vue 코드예요. "
+                                                    "1개 파일이 이 파일을 써요.")
+    assert nodes["web/src/App.vue"]["s"] == "화면 전체 틀" and nodes["web/src/views/About.vue"]["s"] == "화면 페이지"
+    assert nodes["web/src/components/TodoList.vue"]["f"] == [["load()", "GET · /api/todos"]]
+
+
+NUXT_APP = {
+    "package.json": '{"dependencies": {"nuxt": "^3.12.0", "vue": "^3.4.0"}}',
+    "nuxt.config.ts": "export default defineNuxtConfig({ devtools: { enabled: true } })\n",
+    "tsconfig.json": '{ "extends": "./.nuxt/tsconfig.json" }',
+    "app.vue": "<template>\n  <NuxtLayout>\n    <NuxtPage />\n  </NuxtLayout>\n</template>\n",
+    "layouts/default.vue": "<template><div><AppHeader /><slot /></div></template>\n",
+    "pages/index.vue": "<script setup>\nconst { data } = await useFetch('/api/todos')\n</script>\n"
+                       "<template><TodoList :todos=\"data\" /></template>\n",
+    "pages/todos/[id].vue": "<script setup lang=\"ts\">\nimport { format } from '~/utils/format'\n</script>\n"
+                            "<template><p>{{ format('x') }}</p></template>\n",
+    "components/AppHeader.vue": "<template><header>Todo</header></template>\n",
+    "components/TodoList.vue": "<script setup>\ndefineProps(['todos'])\n</script>\n<template><ul></ul></template>\n",
+    "composables/useTodos.ts": "export const useTodos = () => useState('todos', () => [])\n",
+    "utils/format.ts": "export const format = (s: string) => s.trim()\n",
+    "server/api/todos.get.ts": "export default defineEventHandler(() => [])\n",
+    "plugins/analytics.client.ts": "export default defineNuxtPlugin(() => {})\n",
+    "middleware/auth.ts": "export default defineNuxtRouteMiddleware(() => {})\n",
+    "error.vue": "<template><p>error</p></template>\n",
+    "scripts/old.ts": "export const unused = 1\n",
+}
+
+
+def test_a_nuxt_app_has_no_false_cleanup_candidates(tmp_path):
+    graph = write_real(tmp_path, NUXT_APP)
+    check_consistency(graph)
+    nodes = graph["nodes"]
+    assert graph["stack"] == [{"area": "ui", "label": "화면", "tech": "Vue, Nuxt"}]
+    assert {k for k, v in nodes.items() if v.get("e")} == {"app.vue"}
+    assert {k for k, v in nodes.items() if v.get("o")} == {"scripts/old.ts"}  # only what nothing loads
+    assert nodes["app.vue"]["d"] == "실행하면 여기서부터 시작돼요(Nuxt가 처음 띄우는 화면)."
+    header = nodes["components/AppHeader.vue"]
+    assert (header["s"], header["d"]) == ("Vue 화면 조각", "화면의 한 부분(AppHeader)을 그리는 Vue 코드예요. "
+                                                        "Nuxt가 화면에 쓰인 이름을 보고 알아서 불러와요.")
+    page = nodes["pages/todos/[id].vue"]
+    assert page["s"] == "화면 페이지" and "Nuxt가 /todos/[id] 주소에 맞춰 알아서 불러와요." in page["d"]
+    assert page["u"] == ["utils/format.ts"]  # ~/ is the Nuxt app's own folder
+    assert nodes["pages/index.vue"]["h"] == ["server/api/todos.get.ts"]  # useFetch -> server/api/todos.get.ts
+    assert nodes["composables/useTodos.ts"]["d"].startswith("여러 화면 조각이 같이 쓰는 동작을 담은 코드예요.")
+
+
+KIT_APP = {
+    "package.json": '{"devDependencies": {"@sveltejs/kit": "^2.0.0", "svelte": "^5.0.0"}}',
+    "svelte.config.js": "import adapter from '@sveltejs/adapter-auto';\nexport default { kit: { adapter: adapter() } };\n",
+    "src/app.html": "<!doctype html><html><head>%sveltekit.head%</head><body>%sveltekit.body%</body></html>\n",
+    "src/routes/+layout.svelte": "<script>\n  import Nav from '$lib/Nav.svelte';\n  let { children } = $props();\n"
+                                 "</script>\n<Nav />\n{@render children()}\n",
+    "src/routes/+page.svelte": "<script lang=\"ts\">\n  import Counter from '$lib/components/Counter.svelte';\n"
+                               "  let { data } = $props();\n</script>\n<h1>{data.title}</h1>\n<Counter />\n",
+    "src/routes/+page.ts": "export const load = async ({ fetch }) => ({ todos: await (await fetch('/api/todos')).json() });\n",
+    "src/routes/todos/[id]/+page.svelte": "<script>\n  export let data;\n</script>\n<p>{data.id}</p>\n",
+    "src/routes/todos/[id]/+page.server.ts": "export function load({ params }) { return { id: params.id }; }\n",
+    "src/routes/+error.svelte": "<script>\n  import { page } from '$app/stores';\n</script>\n<h1>{$page.status}</h1>\n",
+    "src/routes/api/todos/+server.ts": "import { json } from '@sveltejs/kit';\nexport function GET() { return json([]); }\n",
+    "src/lib/Nav.svelte": "<script context=\"module\">\n  export const links = ['/'];\n</script>\n<nav></nav>\n",
+    "src/lib/components/Counter.svelte": "<script>\n  let count = $state(0);\n</script>\n"
+                                         "<button onclick={() => count++}>{count}</button>\n",
+    "src/lib/Unused.svelte": "<p>unused</p>\n",
+    "src/hooks.server.ts": "export const handle = async ({ event, resolve }) => resolve(event);\n",
+}
+
+
+def test_a_sveltekit_app_has_no_false_cleanup_candidates(tmp_path):
+    graph = write_real(tmp_path, KIT_APP)
+    check_consistency(graph)
+    nodes = graph["nodes"]
+    assert graph["stack"] == [{"area": "ui", "label": "화면", "tech": "Svelte, SvelteKit"}]
+    assert {k for k, v in nodes.items() if v.get("e")} == {"src/routes/+layout.svelte"}
+    assert {k for k, v in nodes.items() if v.get("o")} == {"src/lib/Unused.svelte"}
+    assert nodes["src/routes/+layout.svelte"]["u"] == ["src/lib/Nav.svelte"]  # $lib -> src/lib
+    assert nodes["src/routes/+page.ts"]["h"] == ["src/routes/api/todos/+server.ts"]
+    page = nodes["src/routes/todos/[id]/+page.svelte"]
+    assert (page["s"], page["d"]) == ("화면 페이지", "주소마다 보이는 화면 한 페이지예요. Svelte로 만들었어요. "
+                                                 "SvelteKit이 /todos/[id] 주소에 맞춰 알아서 불러와요.")
+    assert nodes["src/routes/todos/[id]/+page.server.ts"]["s"] == "페이지 데이터 준비"
+    assert nodes["src/routes/+error.svelte"]["s"] == "오류 화면"
+    assert nodes["src/hooks.server.ts"]["s"] == "요청 중간 처리"
+    assert nodes["src/lib/components/Counter.svelte"]["s"] == "Svelte 화면 조각"
+
+
+def test_a_next_app_has_no_false_cleanup_candidates(tmp_path):
+    graph = write_real(tmp_path, {
+        "package.json": '{"dependencies": {"next": "14", "react": "18"}}',
+        "app/layout.tsx": "export default function RootLayout({ children }) { return <html><body>{children}</body></html>; }\n",
+        "app/page.tsx": "import Header from '../components/Header';\nexport default function Home() { return <Header />; }\n",
+        "app/todos/page.tsx": "export default function Todos() { return <ul></ul>; }\n",
+        "app/api/todos/route.ts": "export async function GET() { return Response.json([]); }\n",
+        "components/Header.tsx": "export default function Header() { return <h1>hi</h1>; }\n",
+        "components/Unused.tsx": "export default function Unused() { return <p>x</p>; }\n",
+        "pages/about.tsx": "export default function About() { return <p>about</p>; }\n",
+    })
+    nodes = graph["nodes"]
+    assert {k for k, v in nodes.items() if v.get("e")} == {"app/layout.tsx"}
+    assert {k for k, v in nodes.items() if v.get("o")} == {"components/Unused.tsx"}
+    assert "Next.js가 /todos 주소에 맞춰 알아서 불러와요." in nodes["app/todos/page.tsx"]["d"]
+
+
+# ---------------------------------------------------------------- pattern imports (2026-11-20)
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_pattern_imports_are_ordinary_links_up_to_a_limit(tmp_path, monkeypatch, tree_sitter):
+    real_js(monkeypatch, tree_sitter)
+    files = {
+        "package.json": '{"dependencies": {"vue": "3"}}',
+        "index.html": '<script type="module" src="/src/main.js"></script>\n',
+        "src/main.js": "import './icons/index.js';\nimport './i18n.js';\nconst plugin = require('./plugins/' + name);\n"
+                       "const mystery = require(name);\n",
+        "src/icons/index.js": "export const icons = import.meta.glob('./*.svg', { eager: true });\n"
+                              "export const parts = import.meta.glob('./*.js');\n",
+        "src/i18n.js": "export const load = (lang) => import(`./locales/${lang}.json`);\n",
+        "src/locales/en.json": "{}", "src/locales/ko.json": "{}",
+        "src/plugins/a.js": "", "src/plugins/b/index.js": "",
+        "src/lonely.js": "export const x = 1;\n",
+        "tools/__init__.py": "", "tools/__main__.py": "from tools.loader import load\n",
+        "tools/loader.py": "import importlib\n\ndef load(name):\n"
+                           "    return importlib.import_module(f'tools.commands.{name}')\n",
+        "tools/commands/__init__.py": "",
+        **{f"src/icons/i{n:02}.svg": "<svg/>" for n in range(3)},
+        **{f"src/icons/c{n:02}.js": "" for n in range(55)},
+        **{f"tools/commands/cmd{n:02}.py": "" for n in range(52)},
+    }
+    graph = write_real(tmp_path, files)
+    check_consistency(graph)
+    nodes = graph["nodes"]
+    assert nodes["src/i18n.js"]["u"] == ["src/locales/en.json", "src/locales/ko.json"]
+    assert nodes["src/main.js"]["u"] == ["src/i18n.js", "src/icons/index.js", "src/plugins/a.js",
+                                         "src/plugins/b/index.js"]  # require(name): nothing to know
+    assert nodes["src/plugins/a.js"]["b"] == ["src/main.js"]
+    index = nodes["src/icons/index.js"]
+    assert [u for u in index["u"] if u.endswith(".svg")] == [f"src/icons/i{n:02}.svg" for n in range(3)]
+    assert [u for u in index["u"] if u.endswith(".js")] == [f"src/icons/c{n:02}.js" for n in range(50)]
+    assert nodes["tools/loader.py"]["u"] == [f"tools/commands/cmd{n:02}.py" for n in range(50)]
+    assert graph["warnings"] == ["이름 규칙으로 여러 파일을 한꺼번에 불러오는 코드(src/icons/index.js, tools/loader.py)는 "
+                                 "맞는 파일이 너무 많아서 50개까지만 연결했어요."]
+    # the files past the limit are in use too: not cleanup candidates, and their text says why there is no line
+    assert {k for k, v in nodes.items() if v.get("o")} == {"src/lonely.js"}
+    for rel in ("src/icons/c54.js", "tools/commands/cmd51.py"):
+        assert nodes[rel]["b"] == [] and nodes[rel]["d"].endswith(
+            "다른 파일이 이름 규칙으로 한꺼번에 불러오는 파일 중 하나예요. 맞는 파일이 너무 많아서 연결선은 일부만 그렸어요.")
+
+
+# ------------------------------------------- routers mounted one by one, request helpers, Fastify plugin files (2026-11-21)
+
+TWO_ROUTERS = ("from fastapi import APIRouter\ntodos_router = APIRouter()\nusers_router = APIRouter()\n\n"
+               "@todos_router.get('/list')\ndef list_todos():\n    return []\n\n"
+               "@users_router.get('/items')\ndef user_items():\n    return []\n")
+
+
+@pytest.mark.parametrize("main", [
+    "from fastapi import FastAPI\nfrom routes import todos_router, users_router\napp = FastAPI()\n"
+    "app.include_router(todos_router, prefix='/todos')\napp.include_router(users_router, prefix='/users')\n",
+    "from fastapi import FastAPI\nimport routes\napp = FastAPI()\n"
+    "app.include_router(routes.todos_router, prefix='/todos')\napp.include_router(routes.users_router, prefix='/users')\n",
+], ids=["from-import", "module-attribute"])
+def test_routers_of_one_python_file_answer_only_under_their_own_prefix(tmp_path, main):
+    nodes = write_real(tmp_path, {
+        "main.py": main, "routes.py": TWO_ROUTERS,
+        "web/items.js": "export const items = () => fetch('/users/items');\n",
+        "web/bogus.js": "export const items = () => fetch('/todos/items');\n",
+    })["nodes"]
+    routes = nodes["routes.py"]
+    # each router got both prefixes before: /todos/list, /users/list, /todos/items, /users/items
+    assert routes["f"] == [["list_todos()", "GET · /todos/list"], ["user_items()", "GET · /users/items"]]
+    assert routes["d"].startswith("/todos/list, /users/items 주소로 오는 조회 요청을 처리해요.")
+    assert nodes["web/items.js"]["h"] == ["routes.py"] and nodes["web/bogus.js"]["h"] == []
+
+
+def test_blueprints_of_one_file_answer_only_under_their_own_prefix(tmp_path):
+    nodes = write_real(tmp_path, {
+        "views.py": "from flask import Blueprint\nbp_a = Blueprint('a', __name__, url_prefix='/a')\n"
+                    "bp_b = Blueprint('b', __name__)\n\n@bp_a.route('/x')\ndef x():\n    return ''\n\n"
+                    "@bp_b.route('/y')\ndef y():\n    return ''\n",
+        "app.py": "from flask import Flask\nfrom views import bp_a, bp_b\napp = Flask(__name__)\n"
+                  "app.register_blueprint(bp_a, url_prefix='/v1')\napp.register_blueprint(bp_b, url_prefix='/v2')\n",
+    })["nodes"]
+    assert nodes["views.py"]["f"] == [["x()", "GET · /v1/x"], ["y()", "GET · /v2/y"]]  # GET · /v1/x, /v2/x before
+
+
+EXPRESS_TWO = {
+    "server/routes.js": "const express = require('express');\nconst todos = express.Router();\nconst users = express.Router();\n"
+                        "todos.get('/', (req, res) => res.json([]));\nusers.get('/items', (req, res) => res.json([]));\n"
+                        "module.exports = { todos, users };\n",
+    "server/app.js": "const express = require('express');\nconst { todos, users } = require('./routes');\n"
+                     "const app = express();\napp.use('/todos', todos);\napp.use('/users', users);\n",
+}
+INDEX_ROUTES = {  # one router a file, passed on by an index file
+    "server/routes/todos.js": "import { Router } from 'express';\nconst router = Router();\n"
+                              "router.get('/', (req, res) => res.json([]));\nexport default router;\n",
+    "server/routes/users.js": "import { Router } from 'express';\nconst router = Router();\n"
+                              "router.get('/items', (req, res) => res.json([]));\nexport default router;\n",
+}
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+@pytest.mark.parametrize("files, users", [
+    (EXPRESS_TWO, "server/routes.js"),
+    ({**INDEX_ROUTES,
+      "server/routes/index.js": "export { default as todos } from './todos.js';\nexport { default as users } from './users.js';\n",
+      "server/app.js": "import express from 'express';\nimport { todos, users } from './routes/index.js';\n"
+                       "const app = express();\napp.use('/todos', todos);\napp.use('/users', users);\n"},
+     "server/routes/users.js"),
+    ({**INDEX_ROUTES,
+      "server/routes/index.js": "module.exports = { todos: require('./todos'), users: require('./users') };\n",
+      "server/app.js": "const express = require('express');\nconst routes = require('./routes');\n"
+                       "const app = express();\napp.use('/todos', routes.todos);\napp.use('/users', routes.users);\n"},
+     "server/routes/users.js"),
+], ids=["one-file", "es-index", "cjs-index"])
+def test_js_routers_imported_by_name_answer_only_under_their_own_prefix(tmp_path, monkeypatch, tree_sitter, files, users):
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {**files, "web/items.js": "export const items = () => fetch('/users/items');\n",
+                                  "web/bogus.js": "export const items = () => fetch('/todos/items');\n"})["nodes"]
+    assert nodes[users]["d"].startswith("/users/items 주소로") or nodes[users]["d"].startswith("/todos, /users/items 주소로")
+    assert nodes["web/items.js"]["h"] == [users] and nodes["web/bogus.js"]["h"] == []  # /todos/items is no address
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_a_router_mounted_with_and_without_a_prefix_in_two_files_answers_at_both(tmp_path, monkeypatch, tree_sitter):
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        "server/legacy.js": "const express = require('express');\nconst router = express.Router();\n"
+                            "router.get('/old', (req, res) => res.json([]));\nmodule.exports = router;\n",
+        "server/app.js": "const express = require('express');\nconst app = express();\n"
+                         "app.use('/v1', require('./legacy'));\nmodule.exports = app;\n",
+        "server/plain.js": "const express = require('express');\nconst legacy = require('./legacy');\n"
+                           "const app = express();\napp.use(legacy);\nmodule.exports = app;\n",
+        # middleware with no prefix from a file whose router answers under /auth: no /login as written
+        "server/auth.js": "const express = require('express');\nconst router = express.Router();\n"
+                          "router.post('/login', (req, res) => res.json({}));\nfunction requireAuth(req, res, next) { next(); }\n"
+                          "module.exports = router;\nmodule.exports.requireAuth = requireAuth;\n",
+        "server/secure.js": "const express = require('express');\nconst auth = require('./auth');\n"
+                            "const { requireAuth } = require('./auth');\nconst app = express();\n"
+                            "app.use('/auth', auth);\napp.use(requireAuth);\nmodule.exports = app;\n",
+        "main.py": "from fastapi import FastAPI\nfrom routes.todos import router\nimport v1\napp = FastAPI()\n"
+                   "app.include_router(router)\napp.include_router(v1.api)\n",
+        "v1.py": "from fastapi import APIRouter\nfrom routes.todos import router\napi = APIRouter()\n"
+                 "api.include_router(router, prefix='/v1')\n",
+        "routes/__init__.py": "", "routes/todos.py": TODOS_ROUTER,
+        "web/old.js": "export const old = () => fetch('/old');\n",
+        "web/todos.js": "export const list = () => fetch('/todos');\n",
+        "web/login.js": "export const login = () => fetch('/login', { method: 'POST' });\n",
+    })["nodes"]
+    assert nodes["server/legacy.js"]["d"].startswith("/v1/old, /old 주소로")  # /old was lost before
+    assert nodes["web/old.js"]["h"] == ["server/legacy.js"]
+    assert nodes["routes/todos.py"]["f"] == [["list_todos()", "GET · /todos, /v1/todos"]]  # GET · /v1/todos before
+    assert nodes["web/todos.js"]["h"] == ["routes/todos.py"]
+    assert nodes["server/auth.js"]["d"].startswith("/auth/login 주소로") and nodes["web/login.js"]["h"] == []
+
+
+HELPER_PROJECT = {
+    "frontend/package.json": '{"dependencies": {"react": "^18", "axios": "^1"}}',
+    "frontend/src/lib/api.js": "const BASE = import.meta.env.VITE_API ?? '';\n"
+                               "export const api = (path, opts) => fetch(BASE + path, opts).then((r) => r.json());\n",
+    "frontend/src/lib/request.ts": "export async function request(url: string, method = 'GET') {\n"
+                                   "  const res = await fetch(`/api${url}`, { method });\n  return res.json();\n}\n",
+    "frontend/src/lib/http.js": "import axios from 'axios';\nexport const http = axios.create({ baseURL: '/api' });\n"
+                                "export default http;\n",
+    "frontend/src/lib/index.js": "export { api } from './api';\nexport * from './request';\n"
+                                 "export { default as client } from './http';\n",
+    "frontend/src/lib/endpoints.js": "const BASE = 'http://localhost:8000';\nexport const endpoints = {\n"
+                                     "  get: (path) => fetch(BASE + path),\n"
+                                     "  post(path, body) { return fetch(BASE + path, { method: 'POST', body }); },\n};\n",
+    "frontend/src/TodoList.jsx": (
+        "import { api, request, client } from './lib';\nimport http from './lib/http';\n"
+        "import { endpoints } from './lib/endpoints';\n"
+        "export default function TodoList() {\n  return <ul />;\n}\n"
+        "export async function load() { return api('/api/todos'); }\n"
+        "export async function add() { return request('/todos', 'POST'); }\n"
+        "export async function remove(id) { return http.delete(`/todos/${id}`); }\n"
+        "export async function users() { return client.get('/users'); }\n"
+        "export async function save(note) { return endpoints.post('/api/notes', note); }\n"),
+    "backend/main.py": "from fastapi import FastAPI\nfrom routes import todos, users, notes\napp = FastAPI()\n"
+                       "app.include_router(todos.router, prefix='/api/todos')\napp.include_router(users.router, prefix='/api/users')\n"
+                       "app.include_router(notes.router, prefix='/api/notes')\n",
+    "backend/routes/__init__.py": "",
+    "backend/routes/todos.py": "from fastapi import APIRouter\nrouter = APIRouter()\n\n@router.get('/')\ndef list_todos():\n"
+                               "    return []\n\n@router.post('/')\ndef add_todo():\n    return {}\n\n"
+                               "@router.delete('/{todo_id}')\ndef remove_todo(todo_id: int):\n    return {}\n",
+    "backend/routes/users.py": "from fastapi import APIRouter\nrouter = APIRouter()\n\n@router.get('/')\ndef list_users():\n"
+                               "    return []\n",
+    "backend/routes/notes.py": "from fastapi import APIRouter\nrouter = APIRouter()\n\n@router.post('/')\ndef add_note():\n"
+                               "    return {}\n",
+}
+
+
+def test_requests_through_helpers_made_in_other_files_reach_the_server(tmp_path):
+    from codevision.lang import js_lang
+
+    if not js_lang.TREE_SITTER:
+        pytest.skip("request helpers are found with tree-sitter only")
+    graph = write_real(tmp_path, HELPER_PROJECT)
+    check_consistency(graph)
+    nodes = graph["nodes"]
+    todo = nodes["frontend/src/TodoList.jsx"]
+    assert todo["h"] == ["backend/routes/notes.py", "backend/routes/todos.py", "backend/routes/users.py"]
+    assert dict(todo["f"][1:]) == {  # each at the full address its helper builds
+        "load()": "GET · /api/todos", "add()": "POST · /api/todos", "remove(id)": "DELETE · /api/todos/*",
+        "users()": "GET · /api/users", "save(note)": "POST · /api/notes"}
+    for rel in ("api.js", "request.ts", "http.js", "index.js", "endpoints.js"):  # a helper's own fetch is no request
+        assert nodes[f"frontend/src/lib/{rel}"]["h"] == []
+    assert nodes["backend/routes/todos.py"]["b"] == ["backend/main.py", "frontend/src/TodoList.jsx"]
+
+
+def test_a_file_full_of_helper_calls_is_matched_once(tmp_path, monkeypatch):
+    # 2026-11-21: each call looked through all the calls and functions of its file again, so a generated
+    # API client of 4,000 functions took seconds (O(calls x functions)); now each file is gone through once
+    from codevision.lang import js_lang
+
+    if not js_lang.TREE_SITTER:
+        pytest.skip("request helpers are found with tree-sitter only")
+    walks = [0]
+
+    class Walked(list):
+        def __iter__(self):
+            walks[0] += 1
+            return super().__iter__()
+
+    real = js_lang.analyze
+
+    def analyze(rel, text):
+        facts = real(rel, text)
+        facts.symbols, facts.http_calls = Walked(facts.symbols), Walked(facts.http_calls)
+        return facts
+
+    monkeypatch.setattr(js_lang, "analyze", analyze)
+    lines = ["import { http, api } from './http';"]
+    for i in range(300):
+        lines += [f"export function get{i}() {{ return http.get('/items/{i}'); }}",
+                  f"export function put{i}() {{ return api('/items/{i}', {{ method: 'PUT' }}); }}"]
+    nodes = write_real(tmp_path, {
+        "src/http.js": "import axios from 'axios';\nexport const http = axios.create({ baseURL: '/api' });\n"
+                       "export const api = (path, opts) => fetch('/api' + path, opts);\n",
+        "src/client.js": "\n".join(lines) + "\n",
+    })["nodes"]
+    assert nodes["src/client.js"]["f"][:2] == [["get0()", "GET · /api/items/0"], ["put0()", "PUT · /api/items/0"]]
+    assert walks[0] < 60  # not once or twice for each of the 600 calls
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_a_function_that_takes_an_http_client_is_no_fastify_plugin(tmp_path, monkeypatch, tree_sitter):
+    # 2026-11-21: in a project that uses Fastify, makeTodoApi(http) { http.get("/todos", options) } was read
+    # as a plugin: its requests turned into routes, and cache.get("/settings", load) became an address
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path, {
+        "server/index.js": "const fastify = require('fastify')();\nfastify.get('/todos', async () => []);\n"
+                           "fastify.listen({ port: 3000 });\n",
+        "web/todoApi.js": "module.exports = function makeTodoApi(http) {\n  return { list: () => http.get('/todos', options) };\n"
+                          "};\nconst options = { timeout: 1000 };\n",
+        "web/warm.js": "export default function warm(cache) {\n  cache.get('/settings', load);\n}\nfunction load() {}\n",
+        "web/settings.js": "export const settings = () => fetch('/settings');\n",
+    })["nodes"]
+    assert nodes["web/todoApi.js"]["h"] == ["server/index.js"]  # a request to the server, as before
+    assert nodes["web/settings.js"]["h"] == [] and nodes["web/warm.js"]["h"] == []
+
+
+PLUGIN_FILES = {
+    "routes/todos.js": "module.exports = async function (fastify, opts) {\n  fastify.get('/todos', async () => []);\n"
+                       "  fastify.register(async (f) => {\n    f.get('/stats', async () => ({}));\n  }, { prefix: '/admin' });\n};\n",
+    "routes/users.mjs": "export default async function routes(fastify) {\n  fastify.get('/', async () => []);\n}\n",
+    "web/api.js": "export const todos = () => fetch('/api/todos');\nexport const stats = () => fetch('/api/admin/stats');\n"
+                  "export const users = () => fetch('/api/users');\n",
+}
+FASTIFY_SERVER = ("const fastify = require('fastify')();\nfastify.register(require('{at}routes/todos'), {{ prefix: '/api' }});\n"
+                  "fastify.register(import('{at}routes/users.mjs'), {{ prefix: '/api/users' }});\nfastify.listen({{ port: 3000 }});\n")
+
+
+@pytest.mark.parametrize("tree_sitter", [True, False])
+def test_fastify_plugin_files_give_their_routes_where_they_are_registered(tmp_path, monkeypatch, tree_sitter):
+    real_js(monkeypatch, tree_sitter)
+    nodes = write_real(tmp_path / "app", {**PLUGIN_FILES, "server.js": FASTIFY_SERVER.format(at="./")})["nodes"]
+    assert nodes["routes/todos.js"]["d"].startswith("/api/todos, /api/admin/stats 주소로 오는 조회 요청을 처리해요.")
+    assert nodes["routes/users.mjs"]["d"].startswith("/api/users 주소로 오는 조회 요청을 처리해요.")
+    assert nodes["web/api.js"]["h"] == ["routes/todos.js", "routes/users.mjs"]
+    # a plugin library whose Fastify server is only an example: it registers the plugins, so they are plugins
+    example = write_real(tmp_path / "lib", {**PLUGIN_FILES, "examples/server.js": FASTIFY_SERVER.format(at="../")})
+    assert example["stack"] == [] and example["nodes"]["web/api.js"]["h"] == ["routes/todos.js", "routes/users.mjs"]
+    # a project that does not use Fastify: the same functions are no routes
+    plain = write_real(tmp_path / "plain", PLUGIN_FILES)["nodes"]
+    assert plain["web/api.js"]["h"] == [] and "주소로 오는" not in plain["routes/todos.js"]["d"]
 
 
 # ---------------------------------------------------------------- integration: the demo project
