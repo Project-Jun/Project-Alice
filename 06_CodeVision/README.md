@@ -57,9 +57,12 @@ AI 설명은 이 컴퓨터에서 도는 로컬 AI(Ollama)로 만들어요. 처�
 
 ## 앞으로
 
-1. AI 설명 다듬기: 틀리는 설명이 줄도록 프롬프트를 더 손보기 (인터넷 AI 서비스 연결은 자리만 있어요)
-2. GitHub 연동: 내 GitHub 계정의 저장소를 바로 열기
-3. 실행 파일: Python 없이 쓸 수 있는 exe
+1. AI 설명 다듬기: 틀리는 설명이 줄도록 프롬프트를 더 손보기 (이 로컬 앱에서 인터넷 AI 서비스에 연결하는 기능은 자리만 있어요)
+2. Claude·ChatGPT 스킬(4단계): 전에 계획한 실행 파일(exe) 대신, Claude나 ChatGPT에서 지금과 같은 트리 화면을 HTML 파일 하나로 받기
+   - Claude에 프로젝트를 주고 "이 프로젝트 구조 보여 줘"라고 하면 그 파일을 받아요. `run.bat`이나 Ollama를 켜지 않아도 브라우저로 열면 돼요.
+   - Claude Code와 claude.ai부터 만들고, ChatGPT·Codex는 마지막에 시험해 보고 붙여요.
+   - 스킬로 쓰면 코드가 이 컴퓨터 밖으로 나가요. Claude나 ChatGPT가 그 회사 서버에서 코드를 읽고, claude.ai와 ChatGPT에서는 프로젝트 압축 파일도 그 회사로 올라가요. 코드를 밖으로 보내고 싶지 않으면 지금처럼 이 로컬 앱을 쓰면 돼요.
+3. GitHub 연동(3단계): 내 GitHub 계정의 저장소를 바로 열기 (잠시 멈췄어요. 스킬의 첫 버전을 만든 뒤에, 이 로컬 앱에 아직 필요한지 다시 정해요)
 
 자세한 결정 사항은 [docs/decisions.md](docs/decisions.md), 모듈 구조는 [docs/architecture.md](docs/architecture.md)에 있어요.
 
