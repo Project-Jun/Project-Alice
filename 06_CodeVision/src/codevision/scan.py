@@ -16,7 +16,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .model import ProjectIndex
+from .model import ProjectIndex, atomic, join_stars
 
 IGNORED_DIRS = frozenset({
     ".git", "node_modules", ".venv", "venv", "env", "__pycache__", ".mypy_cache",
@@ -31,6 +31,7 @@ MAX_DEPTH = 64  # folders below this depth are not walked (deep chains are never
 MIN_ENTRIES = 20_000  # entries read from one folder at least (more when max_files is larger)
 GITIGNORE_LIMIT = 256_000  # bytes of .gitignore that are read
 GITIGNORE_RULES = 2_000  # at most this many patterns are used
+GITIGNORE_PATTERN_MAX = 4_096  # a longer pattern is skipped: no real path is that long
 
 # .svg is an image but plain text, so it is not in BINARY_EXTS.
 IMAGE_EXTS = frozenset({
@@ -86,48 +87,89 @@ class _Rule:
     regex: re.Pattern
     negate: bool
     dir_only: bool
-    anchored: bool  # match the whole relative path instead of the name
+    anchored: bool  # match the relative path with a "/" after it ("a/b/") instead of the name
 
 
-def _glob_regex(pattern: str) -> re.Pattern:
-    out: list[str] = []
+# Globs become regular expressions that never backtrack their way into minutes (see
+# model.join_stars: one hostile .gitignore in a downloaded repo would otherwise stop the whole
+# server). Within a path part, the piece after each inner star is taken at its first place. A "**"
+# part is the same one level up: it stands for any number of folders, and the run of parts after
+# it is taken at its first place.
+# Within a part, "**" is an ordinary star, as in git; a "**" part matches zero or more folders,
+# and a "**" at the end (a/**) everything inside. ?, * and [...] never match "/".
+
+
+def _glob_parts(pattern: str) -> list[list]:
+    """The path parts of a glob, each a list of tokens: an int for a run of stars, else a regular
+    expression for exactly one character."""
+    parts: list[list] = [[]]
     i, n = 0, len(pattern)
     while i < n:
-        if pattern.startswith("**/", i):
-            out.append("(?:.*/)?")
-            i += 3
-            continue
-        if pattern.startswith("**", i):
-            out.append(".*")
-            i += 2
-            continue
         c = pattern[i]
-        if c == "*":
-            out.append("[^/]*")
+        if c == "/":
+            parts.append([])
+        elif c == "*":
+            stars = 1
+            while i + 1 < n and pattern[i + 1] == "*":
+                i += 1
+                stars += 1
+            parts[-1].append(stars)
         elif c == "?":
-            out.append("[^/]")
+            parts[-1].append("[^/]")
         elif c == "[" and pattern.find("]", i + 2) != -1:
             j = pattern.find("]", i + 2)
             body = pattern[i + 1:j].replace("\\", "\\\\")
             if body.startswith("!"):
                 body = "^" + body[1:]
-            out.append(f"[{body}]")
+            parts[-1].append(f"(?!/)[{body}]")
             i = j
         else:
-            out.append(re.escape(c))
+            parts[-1].append(re.escape(c))
         i += 1
-    return re.compile("".join(out))
+    return parts
+
+
+def _part_regex(tokens: list) -> str:
+    pieces: list[str] = [""]  # the fixed pieces between the stars
+    for token in tokens:
+        if isinstance(token, int):
+            pieces.append("")
+        else:
+            pieces[-1] += token
+    return join_stars(pieces)
+
+
+def _glob_regex(pattern: str, anchored: bool = False) -> re.Pattern:
+    """The regular expression for a glob: fullmatch it against a name, or with `anchored` against a
+    relative path with a "/" after it ("docs/private/")."""
+    parts = _glob_parts(pattern)
+    if not anchored:
+        return re.compile("/".join(_part_regex(tokens) for tokens in parts), re.S)
+    runs: list[list[str]] = [[]]  # the runs of parts between "**" parts
+    for tokens in parts:
+        if len(tokens) == 1 and isinstance(tokens[0], int) and tokens[0] > 1:
+            runs.append([])
+        else:
+            runs[-1].append(_part_regex(tokens) + "/")
+    out = "".join(runs[0])
+    if len(runs) > 1:
+        for run in runs[1:-1]:
+            if run:  # "**/**" is one "**"
+                out += atomic("(?:[^/]*/)*?" + "".join(run))
+        out += ("(?:[^/]*/)*" + "".join(runs[-1])) if runs[-1] else "(?:[^/]*/)+"
+    return re.compile(out, re.S)
 
 
 def parse_gitignore(text: str) -> list[_Rule]:
     """Simple .gitignore patterns: names, *.ext, dir/, /anchored, **/ prefix, !negation.
 
-    A pattern that cannot be turned into a regular expression (such as "[z-a]") is skipped.
+    A pattern that cannot be turned into a regular expression (such as "[z-a]") is skipped, and so
+    is one longer than GITIGNORE_PATTERN_MAX.
     """
     rules: list[_Rule] = []
     for raw in text.splitlines():
         line = raw.strip()
-        if not line or line.startswith("#"):
+        if not line or line.startswith("#") or len(line) > GITIGNORE_PATTERN_MAX:
             continue
         negate = line.startswith("!")
         if negate:
@@ -141,7 +183,7 @@ def parse_gitignore(text: str) -> list[_Rule]:
         if not line:
             continue
         try:
-            regex = _glob_regex(line)
+            regex = _glob_regex(line, anchored)
         except (re.error, OverflowError, RecursionError):
             continue
         rules.append(_Rule(regex, negate, dir_only, anchored))
@@ -152,10 +194,11 @@ def parse_gitignore(text: str) -> list[_Rule]:
 
 def _ignored(rules: list[_Rule], rel: str, name: str, is_dir: bool) -> bool:
     hit = False
+    path = rel + "/"
     for rule in rules:
         if rule.dir_only and not is_dir:
             continue
-        if rule.regex.fullmatch(rel if rule.anchored else name):
+        if rule.regex.fullmatch(path if rule.anchored else name):
             hit = not rule.negate
     return hit
 

@@ -12,7 +12,13 @@
 - Turning AI explanations off, or closing the server, lets Ollama free the memory of
   the models this server used (unload_models), so the GPU is free for other programs.
 - A few recently analyzed projects (graph and root) stay in memory, least recently
-  used out first, so requests know the node facts. Others are analyzed again.
+  used out first, so requests know the node facts. Others are analyzed again, through
+  build_key(key, root, demo) when the server gives one (a GitHub snapshot's key, so the
+  rebuilt graph has the same root name and cache keys as the page's).
+- roots_in_use(): the roots that the projects in memory, the waiting and running requests
+  and the running jobs read, so the GitHub snapshot cleanup never deletes one of them.
+- forget_projects(keys): the server's logout hook. Those projects leave memory, their jobs
+  stop and their waiting requests are answered (not_found) at once.
 
 node["x"] is {"s", "d", "f": [[signature, text], ...]}: f lists the node's own
 signatures in the node's order, with the rule-based text where the AI gave none.
@@ -30,6 +36,7 @@ import copy
 import itertools
 import json
 import logging
+import os
 import re
 import secrets
 import threading
@@ -267,6 +274,12 @@ def job_items(nodes: dict) -> list[str]:
 
 # --- state -------------------------------------------------------------------------------------
 
+def _log_name(key: str, name):
+    """How a log line names a project's folder or one of its files: never by name inside a GitHub snapshot,
+    which may be a private repo."""
+    return "(a GitHub snapshot)" if str(key).startswith("github:") else name
+
+
 @dataclass
 class Project:
     key: str
@@ -331,11 +344,14 @@ class Job:
 
 
 class AIService:
-    """Everything AI for one server. build(root, demo) analyzes a project again when it is not in memory."""
+    """Everything AI for one server. build(root, demo) analyzes a project again when it is not in memory;
+    build_key(key, root, demo), when given, does it instead and may raise AIError (a project that is gone)."""
 
-    def __init__(self, cache: ExplanationCache, build: Callable[[Path, bool], dict]):
+    def __init__(self, cache: ExplanationCache, build: Callable[[Path, bool], dict],
+                 build_key: Callable[[str, Path, bool], dict] | None = None):
         self.cache = cache
         self._build = build
+        self._build_key = build_key
         self.request_wait = ollama.ANSWER_TIMEOUT + 60.0  # seconds an on-demand request waits for its answer
         self.answer_timeout = ollama.ANSWER_TIMEOUT
         self.start_wait = ollama.START_WAIT
@@ -441,11 +457,70 @@ class AIService:
         if not Path(root).is_dir():
             raise AIError("not_found", M.PROJECT_NOT_FOUND)
         try:
-            graph = self._build(Path(root), demo)
+            if self._build_key is not None:
+                graph = self._build_key(key, Path(root), demo)
+            else:
+                graph = self._build(Path(root), demo)
+        except AIError:
+            raise  # build_key's own answer (a snapshot that is gone)
         except Exception:
-            log.exception("analysis for AI explanations failed: %s", root)
+            log.exception("analysis for AI explanations failed: %s", _log_name(key, root))
             raise AIError("failed", M.ANALYSIS_FAILED) from None  # 502, like every "failed" of explain
         return self.remember(key, root, graph, demo)
+
+    def roots_in_use(self) -> set[Path]:
+        """The roots AI explanations may still read (normcase of the real path): the projects in memory, the
+        waiting and running on-demand requests, and the jobs still working (a cancelled job's current item
+        too). The GitHub snapshot cleanup never deletes these."""
+        with self._lock:
+            roots = [p.root for p in self._projects.values()]
+            roots += [t.project.root for t in self._pending]
+            if self._running_task is not None:
+                roots.append(self._running_task.project.root)
+            roots += [j.project.root for j in self._jobs.values() if j.state == "running" or j.current]
+        out = set()
+        for root in roots:  # outside the lock: realpath may touch the disk
+            try:
+                out.add(Path(os.path.normcase(os.path.realpath(os.fspath(root)))))
+            except (OSError, ValueError):
+                out.add(Path(os.path.normcase(os.path.abspath(os.fspath(root)))))
+        return out
+
+    def forget_projects(self, keys) -> dict:
+        """Let go of these projects (the server's hook when a GitHub logout or an account switch makes private
+        snapshots unreadable): they leave memory, their running jobs stop at once (the item being made still
+        ends in the worker, and its answer is dropped), and their waiting or running on-demand requests are
+        answered not_found. Other projects are untouched. Returns {"projects", "jobs", "tasks"} counts."""
+        keys = {k for k in (keys or ()) if isinstance(k, str)}
+        out = {"projects": 0, "jobs": 0, "tasks": 0}
+        if not keys:
+            return out
+        with self._lock:
+            for key in [k for k in self._projects if k in keys]:
+                del self._projects[key]
+                out["projects"] += 1
+            for job in self._jobs.values():
+                if job.project.key in keys and job.state == "running":
+                    job.cancel = True
+                    job.state = "cancelled"
+                    job.message = M.JOB_PROJECT_CLOSED.format(n=len(job.results))
+                    out["jobs"] += 1
+            kept = collections.deque()
+            for task in self._pending:
+                if task.project.key in keys:
+                    task.error = AIError("not_found", M.PROJECT_CLOSED)
+                    task.done.set()
+                    out["tasks"] += 1
+                else:
+                    kept.append(task)
+            self._pending = kept
+            running = self._running_task
+            if running is not None and running.project.key in keys and not running.done.is_set():
+                running.error = AIError("not_found", M.PROJECT_CLOSED)  # the call ends in the worker; nobody waits
+                running.done.set()
+                out["tasks"] += 1
+            self._wake.notify_all()
+        return out
 
     # --- the cache ---
 
@@ -782,7 +857,7 @@ class AIService:
             if exc.code == "not_running":
                 self.invalidate()
         except Exception:
-            log.exception("AI explanation failed: %s", task.work.node_id)
+            log.exception("AI explanation failed: %s", _log_name(task.project.key, task.work.node_id))
             task.error = AIError("failed", M.FAILED)
         finally:
             with self._lock:
@@ -805,7 +880,7 @@ class AIService:
         except AIError as exc:
             error = exc
         except Exception:
-            log.exception("AI explanation failed: %s", node_id)
+            log.exception("AI explanation failed: %s", _log_name(job.project.key, node_id))
             error = AIError("failed", M.FAILED)
         stop = ""
         if error is not None:

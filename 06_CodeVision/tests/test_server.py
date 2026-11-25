@@ -38,6 +38,12 @@ AI_OFF = {"provider": "local", "enabled": False, "available": False, "model": ""
 AI_ROUTES = [("GET", "/api/ai/status"), ("POST", "/api/ai/settings"), ("POST", "/api/ai/start"),
              ("POST", "/api/ai/explain"), ("POST", "/api/ai/explain-all"), ("GET", "/api/ai/job?id=j1"),
              ("POST", "/api/ai/job/cancel")]
+GH_ROUTES = [("GET", "/api/github/status"), ("POST", "/api/github/login"), ("POST", "/api/github/login/cancel"),
+             ("POST", "/api/github/logout"), ("GET", "/api/github/repos"),
+             ("GET", "/api/github/branches?owner=octocat&repo=Hello-World"), ("POST", "/api/github/resolve"),
+             ("POST", "/api/github/open"), ("GET", "/api/github/job?id=g0123456789ab"),
+             ("POST", "/api/github/job/cancel"),
+             ("GET", "/api/analyze?github=octocat%2FHello-World&branch=main&sha=" + "a" * 40)]
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": cv_server.CSP,
@@ -180,7 +186,8 @@ def test_index_gets_the_token_and_security_headers(app):
     assert headers["Content-Type"] == "text/html; charset=utf-8"
     assert headers["Content-Security-Policy"] == (  # nothing from other sites: the screen works offline
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "font-src 'self'; img-src 'self' data:; connect-src 'self'"
+        "font-src 'self'; img-src 'self' data:; connect-src 'self'; "
+        "base-uri 'none'; form-action 'none'"  # injected markup can neither re-base links nor send a form
     )
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["Referrer-Policy"] == "no-referrer"
@@ -290,10 +297,13 @@ def test_api_needs_the_token(app):
     assert app.json("GET", "/api/analyze?demo=1", token=False)[0] == 403
     assert app.json("POST", "/api/pick-folder", token=False)[0] == 403
     body = json.dumps({"project": "demo", "node": "main.py"}).encode("utf-8")
-    for method, path in AI_ROUTES:
+    for method, path in AI_ROUTES + GH_ROUTES:
         for token in (False, "wrong-token"):
             status, data = app.json(method, path, token=token, body=body if method == "POST" else None)
             assert status == 403 and "권한" in data["error"], (method, path, token)
+    assert app.json("GET", "/api/github/nothing-here", token=False)[0] == 403  # GitHub routes stay hidden too
+    assert app.json("GET", "/api/github/logout", token=False)[0] == 403
+    assert app.httpd.github.status()["logged_in"] is False  # no login or logout was started
     assert app.json("GET", "/api/nothing-here", token=False)[0] == 403
     assert app.json("GET", "/api/pick-folder", token=False)[0] == 403  # no hint about methods without the token
     assert app.json("GET", "/api/ai/explain", token=False)[0] == 403
@@ -303,7 +313,7 @@ def test_api_needs_the_token(app):
 
 def test_ai_routes_check_the_host_too(app):
     port = app.httpd.port
-    for method, path in AI_ROUTES:  # no body: a foreign Host is refused before any body is read
+    for method, path in AI_ROUTES + GH_ROUTES:  # no body: a foreign Host is refused before any body is read
         status, data = app.json(method, path, host=f"evil.example:{port}")
         assert status == 403 and "열 수 없어요" in data["error"], path
     assert app.built == []
@@ -373,6 +383,17 @@ def test_host_header_must_be_exactly_our_address_once(app):
     ("POST", "/api/analyze?demo=1", "GET"),
     ("POST", "/api/recent", "GET"),
     ("POST", "/api/ai/status", "GET"),
+    ("POST", "/api/github/status", "GET"),
+    ("GET", "/api/github/login", "POST"),
+    ("GET", "/api/github/login/cancel", "POST"),
+    ("GET", "/api/github/logout", "POST"),
+    ("POST", "/api/github/repos", "GET"),
+    ("POST", "/api/github/branches?owner=octocat&repo=Hello-World", "GET"),
+    ("GET", "/api/github/resolve", "POST"),
+    ("GET", "/api/github/open", "POST"),
+    ("POST", "/api/github/job?id=g0123456789ab", "GET"),
+    ("GET", "/api/github/job/cancel", "POST"),
+    ("POST", "/api/analyze?github=octocat%2FHello-World&branch=main&sha=" + "a" * 40, "GET"),
     ("POST", "/", "GET"),
     ("POST", "/index.html", "GET"),
     ("POST", "/app.js", "GET"),
@@ -387,6 +408,7 @@ def test_wrong_method_is_405(app, monkeypatch, method, path, allow):
     assert headers["Allow"] == allow
     assert json.loads(raw.decode("utf-8")) == {"error": f"이 주소는 {allow} 방식으로만 부를 수 있어요."}
     assert opened == [] and app.built == []
+    assert app.httpd.github.status()["flow"] is None  # a GET never starts a login
 
 
 @pytest.mark.parametrize("method", ["PUT", "DELETE", "PATCH", "OPTIONS", "TRACE", "FOO"])
@@ -700,10 +722,18 @@ def test_every_reply_has_the_security_headers(app, monkeypatch):
         app.request("GET", "/api/ai/status"),
         app.request("POST", "/api/ai/start", body=b"{}"),  # conftest: no Ollama program -> 409 missing
         app.request("GET", "/api/ai/job?id=nope"),
+        app.request("GET", "/api/github/status"),
+        app.request("GET", "/api/github/repos"),  # not logged in: 401 login_needed
+        app.request("POST", "/api/github/resolve", body=b"{}"),  # 400 bad_input (bodies fit in MAX_BODY 8 here)
+        app.request("GET", "/api/github/job?id=g0123456789ab"),  # 404 job_not_found
+        app.request("GET", "/api/github/branches?owner=octocat&repo=x"),  # conftest's GitHub never answers: 502
+        app.request("GET", "/api/analyze?github=octocat%2Fx&branch=main&sha=" + "a" * 40),  # 404 snapshot_missing
+        app.request("POST", "/api/github/logout", body=b"[]"),  # 400: not a JSON object
     ]
     monkeypatch.setattr(cv_server, "load_recent", lambda: 1 / 0)
     replies.append(app.request("GET", "/api/recent"))
-    assert [r[0] for r in replies] == [200, 200, 200, 200, 403, 403, 404, 405, 400, 413, 501, 200, 409, 404, 500]
+    assert [r[0] for r in replies] == [200, 200, 200, 200, 403, 403, 404, 405, 400, 413, 501, 200, 409, 404,
+                                       200, 401, 400, 404, 502, 404, 400, 500]
     for status, headers, body in replies:
         for name, value in SECURITY_HEADERS.items():
             assert headers[name] == value, (status, name)

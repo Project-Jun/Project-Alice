@@ -6,6 +6,7 @@ The full contract is in docs/architecture.md.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import re
 from dataclasses import dataclass, field
@@ -37,6 +38,31 @@ class ImportRef:
 def is_pattern(imp: ImportRef) -> bool:
     """An import that names its modules by a pattern (see ImportRef): it may point to many files."""
     return imp.kind == "glob" or "*" in (imp.spec or "")
+
+
+_ATOMIC_NAMES = itertools.count()  # group names for atomic(): unique in every pattern
+
+
+def atomic(inner: str) -> str:
+    """Regular expression text that matches `inner` at its first place and never tries it again: an
+    atomic group Python 3.10 can read too (a lookahead never backtracks; the backreference takes its text)."""
+    name = f"a{next(_ATOMIC_NAMES)}"
+    return f"(?=(?P<{name}>{inner}))(?P={name})"
+
+
+def join_stars(pieces: list[str], star: str = "[^/]") -> str:
+    """Regular expression text for fixed pieces with `star`* between each two: one name of a glob
+    (.gitignore rules, import.meta.glob) or of a module name built at run time.
+
+    Written out plainly, "*a*a*a*a*a*a*b" tries every way to split a long name between its stars, which
+    takes minutes for one name, and Python's re holds the GIL all the while: a hostile repo could stop the
+    whole server. Like fnmatch, the piece after each inner star is taken at its first place and never
+    tried again. That is always right when every piece matches a fixed number of characters, none of them
+    one that `star` refuses (the star before can then take what the earlier place leaves)."""
+    if len(pieces) == 1:
+        return pieces[0]
+    middle = "".join(atomic(f"{star}*?{piece}") for piece in pieces[1:-1])
+    return f"{pieces[0]}{middle}{star}*{pieces[-1]}"
 
 
 @dataclass

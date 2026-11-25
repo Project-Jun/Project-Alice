@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import pytest
@@ -1134,6 +1135,14 @@ def test_module_name_patterns_point_to_the_matching_modules():
     pip.root = Path("C:/x/pip")
     assert py.resolve(ImportRef("pip._vendor.*", [], "dynamic"), "_internal/commands/debug.py", pip) == [
         "_vendor/rich/__init__.py", "_vendor/six.py"]
+
+
+def test_a_module_name_pattern_with_many_holes_costs_no_time():
+    # import_module(f"pkg.{a}a{b}a...{z}b") against a long module name took minutes, holding the GIL
+    index = fake_index("pkg/__init__.py", "pkg/loader.py", f"pkg/{'a' * 60}.py", f"pkg/x{'a' * 12}b.py")
+    started = time.monotonic()
+    found = py.resolve(ImportRef("pkg." + "*a" * 12 + "*b", [], "dynamic"), "pkg/loader.py", index)
+    assert time.monotonic() - started < 1 and found == [f"pkg/x{'a' * 12}b.py"]
 
 
 def test_a_name_built_in_a_loop_over_written_strings_is_each_of_them():

@@ -14,6 +14,13 @@ import json
 import re
 import weakref
 
+try:  # Python's own regular-expression parser: what a pattern from a project file may cost
+    from re import _constants as _sre_constants
+    from re import _parser as _sre_parser
+except ImportError:  # pragma: no cover - Python 3.10
+    import sre_constants as _sre_constants
+    import sre_parse as _sre_parser
+
 from codevision.describe import is_boilerplate, join_wrapped
 from codevision.model import (
     ExportName,
@@ -26,10 +33,12 @@ from codevision.model import (
     ImportRef,
     ProjectIndex,
     Symbol,
+    atomic,
     helper_request,
     is_pattern,
     join_http_path,
     join_rel,
+    join_stars,
     normalize_http_path,
     parent_dir,
 )
@@ -3322,17 +3331,88 @@ def _resolve_pattern(imp: ImportRef, importer_dir: str, index: ProjectIndex) -> 
 
 
 def _js_regex(literal: str):
-    """A JavaScript regular expression literal ("/\\.js$/i") as a Python one, or None."""
+    """A JavaScript regular expression literal ("/\\.js$/i") as a Python one, or None (also for one
+    that could cost too much: see _regex_is_cheap)."""
     end = literal.rfind("/")
     if end <= 0:
         return None
     body, flags = literal[1:end], literal[end + 1:]
     body = re.sub(r"\(\?<([A-Za-z_$][\w$]*)>", r"(?P<\1>", body)  # named groups
+    flags = (re.I if "i" in flags else 0) | (re.S if "s" in flags else 0) | (re.M if "m" in flags else 0)
     try:
-        return re.compile(body, (re.I if "i" in flags else 0) | (re.S if "s" in flags else 0)
-                          | (re.M if "m" in flags else 0))
+        found = re.compile(body, flags)
     except (re.error, OverflowError, RecursionError):
         return None
+    return found if _regex_is_cheap(body, flags) else None
+
+
+_REGEX_MAX = 300        # characters of a require.context regular expression that is used at all
+_REGEX_CHOICES = 16     # alternatives and optional parts one such pattern may try at each place
+_FILTER_PATH_MAX = 300  # a longer "./path" is never tested against such a pattern
+_REPEATS = tuple(op for op in (getattr(_sre_constants, name, None) for name in
+                               ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT")) if op is not None)
+_PLAIN_OPS = tuple(op for op in (getattr(_sre_constants, name, None) for name in
+                                 ("LITERAL", "NOT_LITERAL", "ANY", "IN", "AT", "CATEGORY")) if op is not None)
+_ATOMIC = getattr(_sre_constants, "ATOMIC_GROUP", None)  # Python 3.11+
+
+
+def _regex_is_cheap(body: str, flags: int) -> bool:
+    """True when a regular expression taken from a project file costs little on any path.
+
+    Python's re backtracks, and it holds the GIL while it does: /(a|aa)+$/ or /a*a*a*a*a*b/ from a
+    hostile repo would stop the whole server for minutes. Allowed: one open-ended or counted repeat
+    (two when the pattern starts with ^, so it is tried at the start only), nothing repeated inside a
+    repeat, no alternatives inside a repeat, no backreferences, and few choices in all. Every pattern
+    people write for require.context fits (/\\.vue$/, /\\.(png|jpe?g)$/, /^\\.\\/(?!.*\\.spec\\.).*\\.js$/)."""
+    if len(body) > _REGEX_MAX:
+        return False
+    try:
+        items = list(_sre_parser.parse(body, flags))
+    except Exception:  # whatever the parser raises: not a pattern to use
+        return False
+    wide = 0
+
+    def choices(items, repeated: bool):  # the ways the items can be tried at one place; None: refused
+        nonlocal wide
+        total = 1
+        for op, av in items:
+            if op in _PLAIN_OPS:
+                continue
+            if op in _REPEATS:
+                low, high, sub = av
+                if repeated:
+                    return None
+                if high > 1:
+                    wide += 1
+                    inner = choices(sub, True)
+                else:  # x? and (...)?
+                    inner = choices(sub, False)
+                    inner = None if inner is None else inner + 1
+            elif op is _sre_constants.BRANCH:
+                if repeated:
+                    return None
+                inner = 0
+                for alternative in av[1]:
+                    one = choices(alternative, False)
+                    if one is None:
+                        return None
+                    inner += one
+            elif op is _sre_constants.SUBPATTERN:
+                inner = choices(av[-1], repeated)
+            elif _ATOMIC is not None and op is _ATOMIC:
+                inner = choices(av, repeated)
+            elif op in (_sre_constants.ASSERT, _sre_constants.ASSERT_NOT):
+                inner = choices(av[1], repeated)
+            else:  # backreferences, conditionals and anything else
+                return None
+            if inner is None:
+                return None
+            total *= inner
+        return total
+
+    total = choices(items, False)
+    anchored = bool(items) and items[0] == (_sre_constants.AT, _sre_constants.AT_BEGINNING)
+    return total is not None and total <= _REGEX_CHOICES and wide <= (2 if anchored else 1)
 
 
 def _split_glob(pattern: str) -> list[str]:
@@ -3350,21 +3430,26 @@ def _split_glob(pattern: str) -> list[str]:
     return parts
 
 
-def _glob_part(part: str) -> str:
-    """Regular expression for one folder part of a glob."""
-    out, i, n = [], 0, len(part)
+# Globs and run-time names become regular expressions that never backtrack their way into minutes
+# (see model.join_stars). A part with a {a,b} group has pieces of different lengths, so it may hold
+# one star at most. Several "**" parts are handled the same way one level up (see _glob_regex).
+
+def _glob_part(part: str) -> str | None:
+    """Regular expression for one folder part of a glob; None for a {a,b} group next to two stars."""
+    out, i, n = [""], 0, len(part)  # the fixed pieces between the stars
+    group_stars = -1  # stars inside {a,b} groups (-1: no group)
     while i < n:
         c = part[i]
         if c == "*":
             while i + 1 < n and part[i + 1] == "*":
                 i += 1
-            out.append("[^/]*")
+            out.append("")
         elif c == "?":
-            out.append("[^/]")
+            out[-1] += "[^/]"
         elif c == "[" and part.find("]", i + 2) != -1:
             j = part.find("]", i + 2)
-            body = part[i + 1:j].replace("\\", "\\\\")
-            out.append("[" + ("^" + body[1:] if body[:1] in "!^" and len(body) > 1 else body) + "]")
+            body = part[i + 1:j].replace("\\", "\\\\")  # never "/", as in fast-glob (and a fixed piece for join_stars)
+            out[-1] += "(?!/)[" + ("^" + body[1:] if body[:1] in "!^" and len(body) > 1 else body) + "]"
             i = j
         elif c == "{":
             depth, j = 0, i
@@ -3375,7 +3460,7 @@ def _glob_part(part: str) -> str:
                     break
                 j += 1
             if j >= n:
-                out.append(re.escape(c))
+                out[-1] += re.escape(c)
             else:
                 options, level, start = [], 0, i + 1
                 for k in range(i + 1, j):
@@ -3385,13 +3470,56 @@ def _glob_part(part: str) -> str:
                         options.append(part[start:k])
                         start = k + 1
                 options.append(part[start:j])
-                out.append("(?:" + "|".join("/".join(_glob_part(p) for p in o.split("/")) for o in options) + ")")
+                alternatives = []
+                for option in options:
+                    subs = [_glob_part(p) for p in option.split("/")]
+                    if None in subs:
+                        return None
+                    alternatives.append("/".join(subs))
+                out[-1] += "(?:" + "|".join(alternatives) + ")"
+                group_stars = max(group_stars, 0) + sum(option.count("*") for option in options)
                 i = j
         else:
-            out.append(re.escape(c))
+            out[-1] += re.escape(c)
         i += 1
     lead = "(?!\\.)" if part[:1] in _GLOB_CHARS else ""  # like fast-glob: a wildcard skips dotfiles
-    return lead + "".join(out)
+    if group_stars < 0:
+        return lead + join_stars(out)
+    if len(out) - 1 + group_stars > 1:
+        return None  # the pieces have no fixed length: two stars could cost too much
+    return lead + "[^/]*".join(out)
+
+
+_DSTAR = "(?:(?!\\.)[^/]+/)*"  # "**" before more parts: any number of folders, none starting with "."
+
+
+def _glob_regex(parts: list[str]) -> str | None:
+    """A glob's parts as one regular expression, or None. With several "**" parts, the parts after each
+    "**" but the last are matched at their first place (the folders between can be anything "**" takes).
+    That is only right when none of those parts can match a name starting with ".", which "**" never
+    takes, so such a glob gives None."""
+    runs: list[list[str]] = [[]]  # the parts between "**" parts
+    dotted = [False]
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if part == "**" and not last:
+            runs.append([])
+            dotted.append(False)
+            continue
+        found = "(?:(?!\\.)[^/]+/)*(?!\\.)[^/]+" if part == "**" else _glob_part(part)
+        if found is None:
+            return None
+        runs[-1].append(found + ("" if last else "/"))
+        dotted[-1] = dotted[-1] or part.startswith(".")
+    out = "".join(runs[0])
+    for k in range(1, len(runs)):
+        if k == len(runs) - 1:
+            out += _DSTAR + "".join(runs[k])
+        elif dotted[k]:
+            return None
+        else:
+            out += atomic(_DSTAR[:-1] + "*?" + "".join(runs[k]))
+    return out
 
 
 def _pattern_regex(parts: list[str], glob: bool):
@@ -3399,16 +3527,16 @@ def _pattern_regex(parts: list[str], glob: bool):
     if not parts or any(p in ("", ".", "..") for p in parts):
         return None  # "./x/../*.js" or "a//b": not a pattern this follows
     out = []
+    if glob:
+        found = _glob_regex(parts)
+        if found is None:
+            return None
+        out.append(found)
+        parts = []
     for i, part in enumerate(parts):
         last = i == len(parts) - 1
-        if glob:
-            if part == "**":
-                out.append("(?:(?!\\.)[^/]+/)*(?!\\.)[^/]+" if last else "(?:(?!\\.)[^/]+/)*")
-            else:
-                out.append(_glob_part(part) + ("" if last else "/"))
-            continue
         # a name built at run time: `*` is part of one name, which is never empty
-        piece = "[^/]+" if part == "*" else "[^/]*".join(re.escape(p) for p in part.split("*"))
+        piece = "[^/]+" if part == "*" else join_stars([re.escape(p) for p in part.split("*")])
         if not last:
             out.append(piece + "/")
             continue
@@ -3416,7 +3544,7 @@ def _pattern_regex(parts: list[str], glob: bool):
         if ext is None:  # require("./plugins/" + name): plugins/x.js, plugins/x/index.js
             out.append(f"{piece}(?:\\.(?:{_RESOLVE_ALTERNATIVES})|/index\\.(?:{_RESOLVE_ALTERNATIVES}))")
         elif ext.group().lower() in _JS_TO_TS:  # import(`./x/${name}.js`) of TypeScript files
-            stem = "[^/]*".join(re.escape(p) for p in part[:ext.start()].split("*"))
+            stem = join_stars([re.escape(p) for p in part[:ext.start()].split("*")])
             out.append(stem + "\\.(?:" + "|".join(e[1:] for e in (ext.group().lower(), *_JS_TO_TS[ext.group().lower()])) + ")")
         else:
             out.append(piece)
@@ -3455,8 +3583,8 @@ def _pattern_files(pattern: str, importer_dir: str, index: ProjectIndex, glob: b
         if not rel.startswith(prefix):
             break
         tail = rel[len(prefix):]
-        if (regex.fullmatch(tail) and all(f.search("./" + tail) for f in filters)
-                and (glob or not tail.endswith(".d.ts"))):
+        if (regex.fullmatch(tail) and (not filters or len(tail) + 2 <= _FILTER_PATH_MAX)
+                and all(f.search("./" + tail) for f in filters) and (glob or not tail.endswith(".d.ts"))):
             out.append(rel)
     return out
 

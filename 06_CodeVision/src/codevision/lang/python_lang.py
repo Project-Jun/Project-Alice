@@ -21,6 +21,7 @@ from codevision.model import (
     Symbol,
     join_http_path,
     join_rel,
+    join_stars,
     normalize_http_path,
     parent_dir,
     strip_http_base,
@@ -1339,7 +1340,7 @@ def _resolve_pattern(imp: ImportRef, importer: str, index: ProjectIndex) -> list
         return []
     folders, out = [found[1]], []
     for i, part in enumerate(rest):
-        name = re.compile("[^/.]*".join(re.escape(p) for p in part.split("*")))
+        name = re.compile(join_stars([re.escape(p) for p in part.split("*")], "[^/.]"))  # no backtracking blowup
         last = i == len(rest) - 1
         deeper = []
         for folder in folders:

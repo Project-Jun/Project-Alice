@@ -1,4 +1,5 @@
 import os
+import time
 
 import pytest
 
@@ -186,6 +187,49 @@ def test_python_packages_named_like_output_folders_are_kept(tmp_path):
 def test_bad_gitignore_patterns_are_skipped(tmp_path):
     write(tmp_path, {".gitignore": "[z-a].txt\n*.log\n", "a.log": "x", "b.txt": "x"})
     assert scan(tmp_path).index.files == {".gitignore", "b.txt"}
+
+
+@pytest.mark.parametrize("pattern, path, hit", [
+    ("*a*b", "xaxb", True), ("*a*b", "ab", True), ("*a*b", "ba", False), ("*a*a*b", "aab", True),
+    ("*a*a*b", "abab", True), ("*a*a*b", "ab", False), ("a*?b*c", "axbc", True), ("a*?b*c", "abc", False),
+    ("*.py[co]", "x.pyc", True), ("*.py[!co]", "x.pyc", False), ("x*y*z", "x/y/z", False),
+    ("/src/*a*b", "src/xaxb", True), ("/src/*a*b", "src/x/ab", False), ("/a*/b*/c", "ax/by/c", True),
+    ("**/gen", "gen", True), ("**/gen", "a/b/gen", True), ("**/gen", "agen", False),
+    ("a/**/b", "a/b", True), ("a/**/b", "a/x/y/b", True), ("a/**/b", "ab", False),
+    ("a/**", "a/x", True), ("a/**", "a/x/y", True), ("a/**", "a", False),
+    ("**/a/**/b/**/c", "x/a/y/b/c", True), ("**/a/**/b/**/c", "b/a/c", False), ("**/a/**/b/**/c", "a/a/b/b/c", True),
+    ("**/a/**", "x/a/y", True), ("**/a/**", "x/a", False), ("/**", "anything/at/all", True),
+    ("a**", "abc", True), ("/a**", "ab/c", False),  # "**" inside a part is a star, as in git
+])
+def test_gitignore_globs_match_like_git(pattern, path, hit):
+    rules = scan_mod.parse_gitignore(pattern + "\n")
+    name = path.rsplit("/", 1)[-1]
+    assert scan_mod._ignored(rules, path, name, False) is hit
+
+
+def test_a_hostile_gitignore_pattern_costs_no_time(tmp_path):
+    # Written out as a plain regex, "*a*a...*b" tries every split of a long name between its stars:
+    # 90 s for one 40-character name, holding the GIL, which stopped the whole server
+    stars = "*a" * 12 + "*b"
+    deep = "/".join(["a"] * 40)
+    write(tmp_path, {
+        ".gitignore": "\n".join([stars, "/deep/" + stars, "**/" + "/".join(["**", "a"] * 15) + "/b", ""]),
+        "a" * 60 + ".md": "x", "deep/" + "a" * 120: "x", deep + "/c.txt": "x", "kept.b": "x",
+        "a" * 12 + "b": "x", "deep/x" + "a" * 12 + "b": "x", deep + "/b": "x",
+    })
+    started = time.monotonic()
+    result = scan(tmp_path)
+    assert time.monotonic() - started < 1
+    assert result.index.files == {".gitignore", "a" * 60 + ".md", "deep/" + "a" * 120, deep + "/c.txt", "kept.b"}
+    rules = scan_mod.parse_gitignore(stars + "\n")
+    started = time.monotonic()
+    assert scan_mod._ignored(rules, "a" * 250 + "b", "a" * 250 + "b", False) is True
+    assert scan_mod._ignored(rules, "a" * 250, "a" * 250, False) is False
+    assert time.monotonic() - started < 1
+
+
+def test_a_gitignore_pattern_longer_than_any_path_is_skipped():
+    assert scan_mod.parse_gitignore("*a" * 3000 + "\n*.log\n")[0].regex.pattern == "[^/]*\\.log"
 
 
 def test_walk_stops_at_the_limit(tmp_path, monkeypatch):

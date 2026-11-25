@@ -46,8 +46,12 @@ def is_secret_file(rel_path: str) -> bool:
 _PRIVATE_KEY = re.compile(
     r"-----BEGIN ([A-Z0-9 ]{0,40})PRIVATE KEY( BLOCK|)-----.*?(?:-----END \1PRIVATE KEY\2-----|\Z)", re.S)
 
+# A token with dot-separated parts starts only where a run of [A-Za-z0-9_-] starts ((?<![\w-]) is \b
+# that also refuses a "-" before it), so no run is read again from a later start: with \b alone, a
+# crafted file of "-ghs_1_aaaaaaaa" (or "-eyJaaaaaaaa") repeated was read once per start, 41 s for 1 MB.
 _TOKENS = re.compile("|".join([
     r"\bgh[pousr]_[A-Za-z0-9]{30,}",                         # GitHub tokens
+    r"(?<![\w-])ghs_[0-9]+_[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",  # stateless installation tokens
     r"\bgithub_pat_[A-Za-z0-9_]{30,}",
     r"\bglpat-[A-Za-z0-9_-]{20,}",                           # GitLab
     r"\bsk-[A-Za-z0-9_-]{20,}",                              # OpenAI, Anthropic and similar
@@ -58,16 +62,20 @@ _TOKENS = re.compile("|".join([
     r"\bhf_[A-Za-z0-9]{30,}",                                # Hugging Face
     r"\bnpm_[A-Za-z0-9]{36}",
     r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",         # SendGrid
-    r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",  # JWT
+    r"(?<![\w-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",  # JWT
     r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+",
     r"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+",
 ]))
 _URL_PASSWORD = re.compile(r"""(\b[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s:/@"'`<>]{1,64}:)([^\s@/"'`<>]{1,256})(@)""")
+# ...?token=... or ...&token=... in a URL (download links such as codeload's carry one)
+_URL_TOKEN = re.compile(r"([?&](?i:token)=)([A-Za-z0-9_.~%+/=-]{16,})")
 _AUTH_HEADER = re.compile(r"(?i)\b(bearer|basic)(\s+)([A-Za-z0-9._~+/=-]{16,})")
-# "...;Password=hunter2;" in a connection string: no spaces around "=", and the value ends at ";",
-# a quote or the line end (so "password = input(...)" and "password=get(...)" stay as they are).
-_CONN_SECRET = re.compile(r"(?i)(?<![\w.])(AccountKey|SharedAccessKey|Password|Pwd)(=)([^;\"'`\s()]{4,})"
-                          r"(?=;|[\"'`]|[ \t]*$)", re.M)
+# "...;Password=hunter2;" in a connection string: no spaces around "=", and the value (4 or more
+# characters) ends at ";", a quote or the line end (so "password = input(...)" and "password=get(...)"
+# stay as they are). See _mask_connection_secrets.
+_CONN_KEY = re.compile(r"(?i)(?<![\w.])(?:AccountKey|SharedAccessKey|Password|Pwd)=")
+_CONN_VALUE = re.compile(r"[^;\"'`\s()]*")
+_CONN_END = re.compile(r";|[\"'`]|[ \t]*$", re.M)
 
 # name = "literal" (also name: "literal", "name": "literal", name: str = "literal", f(name="literal"),
 # obj["name"] = "literal", and comparisons such as name == "literal"). A name only starts where a word
@@ -116,6 +124,25 @@ def _mask_default(m: re.Match) -> str:
     return m.group(1) + m.group(2) + m.group(3) + m.group(2) + m.group(4) + m.group(5) + quote + MASK + quote
 
 
+def _mask_connection_secrets(text: str) -> str:
+    """The values after AccountKey=, SharedAccessKey=, Password= and Pwd=, each value read once.
+
+    The same as one re.sub with the lookahead (?=;|["'`]|[ \\t]*$) after the value, but that pattern
+    read a long value again from every key inside it ("Password=Password=...(" took minutes for 1 MB,
+    with the GIL held). A key inside a value ends where that value ends, so it fails the same way."""
+    out, last, pos = [], 0, 0
+    while (key := _CONN_KEY.search(text, pos)) is not None:
+        end = _CONN_VALUE.match(text, key.end()).end()
+        if end - key.end() >= 4 and _CONN_END.match(text, end):
+            out += (text[last:key.end()], MASK)
+            last = end
+        pos = max(end, key.end())
+    if not out:
+        return text
+    out.append(text[last:])
+    return "".join(out)
+
+
 def _first_secret_word(line: str) -> int:
     """Where the first name of a secret starts on the line (quoted text with spaces aside), or -1."""
     bare = _PROSE.sub(lambda m: " " * len(m.group(0)), line)
@@ -138,16 +165,17 @@ def _mask_line(line: str) -> str:
 
 
 def mask_secrets(text: str) -> str:
-    """Replace private key blocks, well-known token formats, passwords in URLs and secret-looking
-    values ("API_KEY = '...'", "password: '...'", 'os.getenv("SECRET_KEY", "...")',
+    """Replace private key blocks, well-known token formats, ?token= values and passwords in URLs, and
+    secret-looking values ("API_KEY = '...'", "password: '...'", 'os.getenv("SECRET_KEY", "...")',
     'process.env.JWT_SECRET || "..."', 'password == "..."') with MASK. Everything else stays as it is."""
     if not text:
         return text
     text = _PRIVATE_KEY.sub(MASK, text)
     text = _TOKENS.sub(MASK, text)
+    text = _URL_TOKEN.sub(lambda m: m.group(1) + MASK, text)
     text = _URL_PASSWORD.sub(lambda m: m.group(1) + MASK + m.group(3), text)
     text = _AUTH_HEADER.sub(lambda m: m.group(1) + m.group(2) + MASK, text)
-    text = _CONN_SECRET.sub(lambda m: m.group(1) + m.group(2) + MASK, text)
+    text = _mask_connection_secrets(text)
     if _SECRET_LINE.search(text):  # only lines that name a secret are searched for values
         lines = text.splitlines(keepends=True)
         for i, line in enumerate(lines):

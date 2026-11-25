@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import pytest
@@ -1097,6 +1098,51 @@ def test_pattern_imports_point_to_the_files_they_match(tmp_path):
     assert hits("../*.js") == ["outside.js"]
     assert hits("../../*.js") == [] and hits("../../../x/*", "require") == []
     assert hits("lodash/*", "dynamic") == [] and hits("*.js") == []
+
+
+def test_hostile_patterns_cost_no_time(tmp_path):
+    # Written out plainly, each of these took minutes on one long name in Python's re, which holds the GIL:
+    # a repo's own JS file could stop the whole server while it was analyzed
+    deep = "/".join(["a"] * 30)
+    index = write_project(tmp_path, {
+        "package.json": "{}", "src/main.js": "", f"src/{'a' * 60}.js": "", f"src/{'a' * 12}b": "",
+        f"src/{deep}/x.b": "", f"src/{deep}/y.c": "", "src/p/aaab.js": "",
+    })
+
+    def hits(spec, kind="glob", names=()):
+        return js_lang.resolve(ImportRef(spec, list(names), kind), "src/main.js", index)
+
+    started = time.monotonic()
+    assert hits("./" + "*a" * 12 + "*b") == [f"src/{'a' * 12}b"]
+    assert hits("./" + "/".join(["**", "a"] * 12) + "/*.b") == [f"src/{deep}/x.b"]
+    assert hits("./p/" + "*a" * 3 + "*b.js", "dynamic") == ["src/p/aaab.js"]  # import(`./p/${x}a${y}a...`)
+    assert hits("./*", names=["/(a|aa)+$/"]) == [] and hits("./*", names=["/" + "a*" * 12 + "b/"]) == []
+    assert time.monotonic() - started < 1
+
+
+@pytest.mark.parametrize("body, cheap", [
+    (r"\.svg$", True), (r"\.(png|jpe?g|gif|svg)$", True), (r"Base[A-Z]\w+\.(vue|js)$", True),
+    (r"^\.\/(?!.*\.spec\.).*\.tsx?$", True), (r"^\.\/((?!\/)[\s\S])+\/index\.vue$", True),
+    (r"(a|aa)+$", False), (r"(a+)+", False), (r"a*a*b", False), (r"^a*a*a*b", False), (r"(\w)\1", False),
+    (r"a?a?a?a?a?aaaaa", False), ("x" * 400, False),
+])
+def test_require_context_patterns_that_could_cost_too_much_are_not_used(body, cheap):
+    assert js_lang._regex_is_cheap(body, 0) is cheap
+    assert (js_lang._js_regex(f"/{body}/") is not None) is cheap
+
+
+def test_a_glob_class_never_matches_a_folder_separator(tmp_path):
+    index = write_project(tmp_path, {"package.json": "{}", "src/main.js": "", "src/a/b.js": "", "src/ab.js": ""})
+    # [!x] used to match the "/" of a/b.js, so "*[!x]b.js" reached into a folder
+    assert js_lang.resolve(ImportRef("./*[!x]b.js", [], "glob"), "src/main.js", index) == ["src/ab.js"]
+
+
+def test_a_brace_group_beside_two_stars_and_dotted_parts_between_globstars_give_no_links(tmp_path):
+    index = pattern_index(tmp_path)
+    assert js_lang.resolve(ImportRef("./pages/*{Home,About}*.vue", [], "glob"), "src/main.js", index) == []
+    assert js_lang.resolve(ImportRef("./**/.x/**/*.vue", [], "glob"), "src/main.js", index) == []
+    assert js_lang.resolve(ImportRef("./pages/{Home,About}*", [], "glob"), "src/main.js", index) == [
+        "src/pages/About.vue", "src/pages/Home.vue"]  # one star is fine
 
 
 def test_sveltekit_lib_and_nuxt_aliases(tmp_path):

@@ -49,8 +49,11 @@ button.pri:disabled{background:transparent;color:var(--text-disabled);border-col
 /* Korean text wraps between words, not inside them ("써요." stays whole); a long unbroken string can still
    break anywhere. Paths and file names keep the normal rules (.st-fn, .src-p, .pp, .er-path, .chip ...). */
 .st-lead,.st-lab,.st-msg,.er-msg,noscript p,.cv .ttl-s,.cv .hid,.cv .wn span,.cv .stk,.cv .lg,
-.cv .pm,.cv .ps,.cv .pds,.cv .pl,.cv .none,.cv .fn span,.cv .pa,.cv .aip p,.cv .aip-l,.cv .aip-jt{word-break:keep-all;overflow-wrap:anywhere}
-.cv [hidden]{display:none!important}
+.cv .pm,.cv .ps,.cv .pds,.cv .pl,.cv .none,.cv .fn span,.cv .pa,.cv .aip p,.cv .aip-l,.cv .aip-jt,
+.gh p,.gh li,.gh summary,.gh .gh-m{word-break:keep-all;overflow-wrap:anywhere}
+/* GitHub names in those lines (accounts, repos, branches) keep the normal rules, like paths */
+.gh .gh-nm,.gh .gh-n,.gh .gh-who,.gh .gh-pf,.gh .gh-code{word-break:normal}
+.cv [hidden],.st [hidden]{display:none!important}
 
 /* start and error screens */
 .st{max-width:560px;margin:32px auto 0;font-size:14px}
@@ -93,6 +96,108 @@ button.pri:disabled{background:transparent;color:var(--text-disabled);border-col
 .er-path{margin:6px 0 0 28px;font-family:var(--font-mono);font-size:12px;color:var(--text-muted);overflow-wrap:anywhere}
 .er-path:empty{display:none}
 .er-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+/* a link that leaves for GitHub (a new tab), drawn as a button */
+a.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 12px;box-sizing:border-box;font-size:14px;line-height:1;white-space:nowrap;color:var(--text-primary);text-decoration:none;border:0.5px solid var(--border-strong);border-radius:var(--radius)}
+a.btn:hover{background:var(--surface-1)}
+a.btn:focus-visible{outline:2px solid var(--border-accent);outline-offset:2px}
+a.btn.pri{background:var(--bg-accent);color:var(--text-accent);border-color:var(--border-accent)}
+a.btn.pri:hover{border-color:var(--fill-accent)}
+.rc-p .ti{font-size:12px;margin-right:2px;vertical-align:-.15em}
+.rc-lk{white-space:nowrap}
+
+/* start screen: the GitHub card (app.js ghCtl), under the folder card, or above it while logged in */
+.st-cards{display:flex;flex-direction:column;gap:16px}
+.gh{padding:20px}
+.gh :where(p,ol){margin:0}
+.gh-h{display:flex;align-items:center;gap:8px;margin:0;font-size:16px;line-height:1.4}
+.gh-h .ti{font-size:18px;color:var(--text-secondary)}
+.gh-h:focus{outline:none}
+.gh-msg{margin-top:8px;color:var(--text-secondary)}
+.gh-msg:empty,.gh-hint:empty,.gh-pn:empty,.gh-pf:empty{display:none}
+.gh-intro{margin-top:8px}
+.gh-note{margin-top:8px;font-size:12px;line-height:1.6;color:var(--text-muted)}
+.gh-info{display:flex;align-items:flex-start;gap:6px;margin-top:8px;font-size:12px;color:var(--text-muted)}
+.gh-info .ti{flex:none;margin-top:3px;font-size:13px}
+.gh-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
+.gh button{display:inline-flex;align-items:center;gap:6px}
+.gh .gh-acts .ti{font-size:16px}
+.gh .chip{height:auto;padding:3px 9px;font-size:12px;line-height:1.4}
+.gh .sbtn{height:28px;padding:0 10px;font-size:12px}
+.gh .sbtn .ti{font-size:13px}
+.gh .lnk{display:inline-flex;align-items:center;gap:3px;border-radius:4px;color:var(--text-accent);text-decoration:underline;text-decoration-color:var(--border-accent);text-underline-offset:3px}
+.gh .lnk .ti{font-size:12px}
+.gh .lnk:focus-visible{outline:2px solid var(--border-accent);outline-offset:2px}
+.gh [aria-disabled="true"]{color:var(--text-disabled);border-color:var(--border);background:transparent;cursor:default}
+.gh-lod{margin-top:4px}
+.gh-err{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;margin-top:10px;color:var(--text-danger)}
+.gh-err p{flex:1 1 220px;min-width:0}
+.gh-nm{font-weight:500;overflow-wrap:anywhere}
+/* a repo opening (and one the server is already downloading); ?github= asking first */
+.gh-prog,.gh-ask,.gh-oth{margin-top:12px;padding:12px;border-radius:var(--radius)}
+.gh-prog{background:var(--bg-neutral)}
+.gh-ask,.gh-oth{border:0.5px solid var(--border-accent);background:var(--bg-accent-muted)}
+.gh-prog .gh-acts,.gh-ask .gh-acts,.gh-oth .gh-acts{margin-top:10px}
+.gh-pt{display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px}
+.gh-pt .ti{font-size:16px}
+.gh-pn{color:var(--text-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.gh-pf{margin-top:2px;font-size:12px;color:var(--text-muted);overflow-wrap:anywhere}
+.gh-bar{height:6px;margin-top:8px;border-radius:3px;background:var(--border);overflow:hidden}
+.gh-bar>span{display:block;width:0;height:100%;border-radius:3px;background:var(--fill-accent);transition:width .4s ease}
+.gh-bar.ind>span{width:30%;animation:gh-ind 1.4s ease-in-out infinite}
+@keyframes gh-ind{from{transform:translateX(-100%)}to{transform:translateX(340%)}}
+/* the code to put in on GitHub: large, in the middle, with its countdown (not a live region) under it */
+.gh-hint{margin-top:10px}
+.gh-cb{margin-top:12px;text-align:center}
+.gh-code{display:inline-block;max-width:100%;box-sizing:border-box;padding:8px 16px 8px calc(16px + .1em);border-radius:var(--radius);background:var(--bg-neutral);font-family:var(--font-mono);font-size:28px;font-weight:600;line-height:1.3;letter-spacing:.1em;overflow-wrap:anywhere}
+.gh-code:focus{outline:none}
+.gh-code:focus-visible{outline:2px solid var(--border-accent);outline-offset:2px}
+.gh-timer{margin-top:4px;font-size:12px;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.gh-flow .gh-acts{justify-content:center}
+.gh-flow .gh-acts>*{padding:0 10px} /* 코드 복사, GitHub 열기 and 취소 still share one line at 375px */
+.gh-warn{display:flex;align-items:flex-start;gap:6px;margin-top:14px;padding:8px 10px;border-radius:var(--radius);background:var(--bg-warning);color:var(--text-warning);font-size:13px;line-height:1.55}
+.gh-warn .ti{flex:none;margin-top:2px;font-size:14px}
+.gh-steps{margin-top:12px;padding-left:22px;font-size:13px;line-height:1.6;color:var(--text-secondary)}
+.gh-wait,.gh-load,.gh-pw{display:flex;align-items:center;gap:6px;margin-top:12px;color:var(--text-secondary)}
+/* logged in: the account, the repo list (8 at a time, no inner scroll), the branch row */
+.gh-acct{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-top:10px}
+.gh-who{min-width:0;color:var(--text-secondary);overflow-wrap:anywhere}
+.gh-lo{margin-top:10px;padding:12px;border-radius:var(--radius);border:0.5px solid var(--border-strong);background:var(--surface-1)}
+.gh-lo .gh-acts{margin-top:10px}
+.gh-ni,.gh-none,.gh-ls{margin-top:14px}
+.gh-q{display:block;width:100%;height:36px;box-sizing:border-box;padding:0 10px;font-family:inherit;font-size:14px;color:var(--text-primary);background:var(--surface-1);border:0.5px solid var(--border-strong);border-radius:var(--radius)}
+.gh-q::placeholder{color:var(--text-muted)}
+.gh-q:focus{outline:2px solid var(--border-accent);outline-offset:0}
+.gh-q:disabled{color:var(--text-disabled)}
+.gh-cnt{margin-top:8px;font-size:12px;color:var(--text-muted)}
+.gh-tr{margin-top:2px;font-size:12px;color:var(--text-muted)}
+.gh-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.gh .gh-it{display:flex;align-items:flex-start;gap:10px;width:100%;height:auto;padding:10px 12px;text-align:left;line-height:1.4;background:var(--surface-2);border-color:var(--border)}
+.gh .gh-it:hover{background:var(--surface-1)}
+.gh .gh-it[aria-pressed="true"]{border-color:var(--border-accent);background:var(--bg-accent-muted);box-shadow:inset 0 0 0 1px var(--border-accent)}
+.gh-it>.ti{flex:none;margin-top:1px;font-size:18px;color:var(--text-secondary)}
+.gh-t{display:flex;flex-direction:column;gap:2px;flex:1 1 auto;min-width:0}
+.gh-n{font-weight:500;overflow-wrap:anywhere}
+.gh-m{font-size:12px;color:var(--text-muted)}
+.gh-it:disabled .gh-n,.gh-it:disabled .gh-m,.gh-it[aria-disabled="true"] .gh-n,.gh-it[aria-disabled="true"] .gh-m{color:var(--text-disabled)}
+.gh .bd{flex:none;align-self:center;font-size:11px;line-height:16px;padding:1px 6px;border-radius:var(--radius);white-space:nowrap}
+.gh .tw{background:var(--bg-warning);color:var(--text-warning)}
+.gh .gh-more{width:100%;margin-top:8px;justify-content:center}
+.gh-br{margin-top:12px;padding:12px;border-radius:var(--radius);background:var(--bg-neutral)}
+.gh-sel{overflow-wrap:anywhere}
+.gh-bn{display:flex;align-items:flex-start;gap:6px;margin-top:4px;font-size:12px;color:var(--text-secondary)}
+.gh-bn .ti{flex:none;margin-top:3px;font-size:13px}
+.gh-br .st-lab{display:flex;align-items:center;gap:4px;margin-top:10px}
+.gh-brr{display:flex;flex-wrap:wrap;gap:8px}
+.gh-brr select{flex:1 1 180px;min-width:0;height:36px;box-sizing:border-box;padding:0 8px;font-family:inherit;font-size:14px;color:var(--text-primary);background:var(--surface-1);border:0.5px solid var(--border-strong);border-radius:var(--radius)}
+.gh-brr select:focus-visible{outline:2px solid var(--border-accent);outline-offset:1px}
+.gh-brr select:disabled{color:var(--text-disabled);background:transparent}
+/* a public repo by its address: in the logged-out view, or under 다른 공개 저장소 열기 */
+.gh-pubw{margin-top:16px}
+.gh-pubd{margin-top:16px;padding-top:12px;border-top:0.5px solid var(--border)}
+.gh-pubd>summary{width:fit-content;cursor:pointer;color:var(--text-secondary);border-radius:4px}
+.gh-pubd>summary:focus-visible{outline:2px solid var(--border-accent);outline-offset:2px}
+.gh-pubd .gh-pubw{margin-top:10px}
+@media (prefers-reduced-motion:reduce){.gh-bar>span{transition:none}.gh-bar.ind>span{animation:none;width:100%;opacity:.35}}
 
 /* project view: header lines */
 .cv{font-size:13px;color:var(--text-primary);padding:.5rem 0}
@@ -105,6 +210,10 @@ button.pri:disabled{background:transparent;color:var(--text-disabled);border-col
 .cv .src-p{overflow-wrap:anywhere}
 .cv .src-p>span{display:inline-block}
 .cv .src-p>span:first-child::before{content:"·";content:"·" / "";margin:0 6px 0 3px;-webkit-user-select:none;user-select:none}
+/* a GitHub repo: "GitHub · owner/repo · branch"; the branch can break anywhere, a private repo ends with a lock */
+.cv .src-b{overflow-wrap:anywhere}
+.cv .src-b::before{content:"·";content:"·" / "";margin:0 6px 0 3px;-webkit-user-select:none;user-select:none}
+.cv .src-t>.src-l{margin:0 0 0 6px;font-size:12px}
 .cv .src-r{margin-left:auto;display:inline-flex;align-items:center;gap:8px;position:relative}
 /* The AI chip: grey while AI is off, blue while it works, amber while it is on but cannot work (Ollama off ...). */
 .cv button.ai{height:auto;border:0}

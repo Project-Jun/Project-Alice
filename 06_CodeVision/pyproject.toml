@@ -12,6 +12,7 @@ dependencies = [
   "tree-sitter>=0.25",
   "tree-sitter-javascript>=0.25",
   "tree-sitter-typescript>=0.23",
+  "keyring>=25.7,<26",
 ]
 
 [project.optional-dependencies]

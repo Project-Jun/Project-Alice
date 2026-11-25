@@ -8,7 +8,9 @@
    - from 1024px the panel stands beside the diagram and stays in view (app.css .cvb); below that it
      is under the diagram, and choosing a file brings it into view.
    AI explanations (aiCtl) are not in the mockup: the header chip opens the AI panel, and while AI is on
-   the side panel and the tree labels use the AI's text, node.x (docs/architecture.md 6 and 7). */
+   the side panel and the tree labels use the AI's text, node.x (docs/architecture.md 6 and 7).
+   GitHub (ghCtl, runGh) is not in the mockup either: the start screen's GitHub card logs in and lists the repos,
+   and a repo opens as a snapshot the server downloads, then reads like any folder (docs/architecture.md 6-1). */
 (() => {
   'use strict';
 
@@ -20,7 +22,9 @@
   const ESC = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'};
   const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ESC[c]);
   const str = v => (v == null ? '' : String(v));
+  const lc = v => str(v).toLowerCase();
   const list = v => (Array.isArray(v) ? v : []);
+  const sleep = ms => new Promise(res => { setTimeout(res, ms); });
   const own = (o, k) => o != null && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
   const dict = () => Object.create(null); // id-keyed maps: ids like "constructor" stay plain keys
   const num = v => (Number.isFinite(+v) ? Math.max(0, Math.round(+v)) : 0);
@@ -71,14 +75,16 @@
   const SB = bd('tn', '시작점', 'ti-player-play');
   const OB = bd('tw', '정리 후보', 'ti-alert-triangle');
   const areaName = (G, a) => (own(G.areas, a) && typeof G.areas[a] === 'string' && G.areas[a] ? G.areas[a] : AREA[a][0]);
-  const projName = G => str(G.name) || baseName(G.source && G.source.path) || '프로젝트';
+  const projName = G => str(G.name) || baseName(G.source && G.source.path) || str(G.source && G.source.repo) || '프로젝트';
 
   // ---------- server ----------
-  // An error keeps the HTTP status and the "code" that the /api/ai/ replies add ("timeout", "busy" ...).
-  function fail(msg, code, status) {
+  // An error keeps the HTTP status, the "code" that the /api/ai/ and /api/github/ replies add ("timeout", "busy" ...)
+  // and the whole reply (data: GitHub's retry_after and install_url).
+  function fail(msg, code, status, data) {
     const e = new Error(msg);
     e.code = code || '';
     e.status = status || 0;
+    e.data = data && typeof data === 'object' ? data : null;
     return e;
   }
   // body: the JSON to POST ({} when none). ms: stop waiting after that long (the error's code is then "timeout").
@@ -100,24 +106,44 @@
     } finally {
       clearTimeout(tm);
     }
-    if (j && typeof j.error === 'string' && j.error) throw fail(j.error, typeof j.code === 'string' ? j.code : '', r.status);
+    if (j && typeof j.error === 'string' && j.error) throw fail(j.error, typeof j.code === 'string' ? j.code : '', r.status, j);
     if (!r.ok || !j || typeof j !== 'object') throw fail('요청을 처리하지 못했어요. 잠시 뒤에 다시 해 주세요.', '', r.status);
     return j;
   }
 
-  // Keep the open project in the address bar so a reload opens it again.
+  // Keep the open project in the address bar so a reload opens it again. A GitHub repo is kept without its commit:
+  // the reload asks GitHub for the branch's newest one (see startGh for what such an address may open by itself).
   function setQuery(r) {
-    const q = !r ? '' : r.kind === 'demo' ? '?demo=1' : '?path=' + encodeURIComponent(r.path);
+    const q = !r ? '' : r.kind === 'demo' ? '?demo=1'
+      : r.kind === 'github' ? '?github=' + encodeURIComponent(r.owner + '/' + r.repo) + (r.branch ? '&branch=' + encodeURIComponent(r.branch) : '')
+      : '?path=' + encodeURIComponent(r.path);
     try { history.replaceState(null, '', location.pathname + q); } catch (e) { /* not allowed on file:// */ }
+  }
+  // The analysis of a project: {kind: 'demo'}, {kind: 'path', path}, or a GitHub snapshot {kind: 'github', owner, repo,
+  // branch, sha} (graph.source has these too). run() and aiCtl's refreshX both ask here; a snapshot is never downloaded again.
+  function analyzeUrl(s) {
+    if (s.kind === 'demo') return '/api/analyze?demo=1';
+    if (s.kind === 'github') {
+      return '/api/analyze?github=' + encodeURIComponent(str(s.owner) + '/' + str(s.repo)) + '&branch=' + encodeURIComponent(str(s.branch))
+        + '&sha=' + encodeURIComponent(str(s.sha));
+    }
+    return '/api/analyze?path=' + encodeURIComponent(s.path);
   }
 
   // ---------- screens ----------
-  let screen = '', busy = false, last = null, typed = '', view = null, ro = null, aic = null;
+  let screen = '', busy = false, last = null, typed = '', view = null, ro = null, aic = null, gh = null;
   const BRAND = '<h1 class="st-name" tabindex="-1"><i class="ti ti-binary-tree-2" aria-hidden="true"></i>CodeVision</h1>';
+  // The start screen's folder card (the GitHub card beside it is GH_CARD, run by ghCtl).
+  const ST_CARD = `<div class="card st-card">
+<div class="st-row"><button type="button" class="pri" data-act="pick"><i class="ti ti-folder-search" aria-hidden="true"></i>폴더 선택…</button><button type="button" data-act="demo"><i class="ti ti-sparkles" aria-hidden="true"></i>예제 프로젝트 열기</button></div>
+<form class="st-form" novalidate><label class="st-lab" for="cv-path">또는 폴더 경로를 직접 넣어 주세요</label><div class="st-in"><input id="cv-path" type="text" spellcheck="false" autocomplete="off" placeholder="예: C:\\Users\\me\\projects\\my-app"><button type="submit">분석</button></div></form>
+<div class="st-msg" role="status"></div>
+</div>`;
 
   function leave() {
     view = null;
     if (aic) { aic.quit(); aic = null; } // a job goes on in the server; this screen just stops following it
+    if (gh) { gh.quit(); gh = null; } // so does a download: the next start screen shows it again
     if (ro) { ro.disconnect(); ro = null; }
     app.classList.remove('wide');
   }
@@ -127,55 +153,98 @@
     if (e) e.focus();
   }
 
-  function showStart(fc) {
+  // fc: where the focus goes (nowhere on the first load). ask: a repo from ?github= that is not in the recent list: the
+  // GitHub card asks before it opens (startGh). gfc: 'login' puts the focus on 'GitHub로 로그인' once the card knows.
+  function showStart(fc, ask, gfc) {
     leave();
     screen = 'start';
     document.title = 'CodeVision';
+    // Logged in (when last seen): the GitHub card comes first, so the repo list is right under the lead on a phone.
+    const first = !!ghLast && ghLast.in;
     app.innerHTML = `<section class="st">${BRAND}
-<p class="st-lead">프로젝트 폴더를 고르면 폴더와 파일이 어떻게 이어져 있는지 그림으로 보여 드려요.</p>
-<div class="card st-card">
-<div class="st-row"><button type="button" class="pri" data-act="pick"><i class="ti ti-folder-search" aria-hidden="true"></i>폴더 선택…</button><button type="button" data-act="demo"><i class="ti ti-sparkles" aria-hidden="true"></i>예제 프로젝트 열기</button></div>
-<form class="st-form" novalidate><label class="st-lab" for="cv-path">또는 폴더 경로를 직접 넣어 주세요</label><div class="st-in"><input id="cv-path" type="text" spellcheck="false" autocomplete="off" placeholder="예: C:\\Users\\me\\projects\\my-app"><button type="submit">분석</button></div></form>
-<div class="st-msg" role="status"></div>
-</div>
-<div class="st-rc" hidden><div class="st-lab">최근에 연 폴더</div><div class="st-list"></div></div>
+<p class="st-lead">프로젝트 폴더나 GitHub 저장소를 고르면 폴더와 파일이 어떻게 이어져 있는지 그림으로 보여 드려요.</p>
+<div class="st-cards">${first ? GH_CARD + ST_CARD : ST_CARD + GH_CARD}</div>
+<div class="st-rc" hidden><div class="st-lab">최근에 연 프로젝트</div><div class="st-list"></div></div>
 </section>`;
     const inp = app.querySelector('#cv-path');
     inp.value = typed;
     inp.addEventListener('input', () => { typed = inp.value; });
-    loadRecent();
+    const g = gh = ghCtl(gfc);
+    g.attach();
+    loadRecent().then(items => {
+      if (!ask || gh !== g || busy) return;
+      if (items.some(it => it.kind === 'github' && sameRepo(it, ask))) run({kind: 'github', owner: ask.owner, repo: ask.repo, branch: ask.branch});
+      else g.ask(ask);
+    });
     focusTo(fc);
   }
 
+  // The recent list (folders and GitHub repos, newest first). Its repos also tell the branch select which branch a repo
+  // was last opened with (recentItems). Returns the items.
   async function loadRecent() {
     let j;
-    try { j = await api('/api/recent'); } catch (e) { return; }
+    try { j = await api('/api/recent'); } catch (e) { return []; }
+    const items = list(j.items).map(recentItem).filter(Boolean).slice(0, 10);
+    recentItems = items;
     const box = app.querySelector('.st-rc');
-    if (!box || screen !== 'start') return;
-    const items = list(j.items).filter(it => it && typeof it.path === 'string' && it.path).slice(0, 10);
-    if (!items.length) return;
+    if (!box || screen !== 'start') return items;
     const rows = box.querySelector('.st-list');
     rows.textContent = '';
-    items.forEach(it => {
-      const n = str(it.name) || baseName(it.path), b = el('button', 'rc'), t = el('span', 'rc-t'), p = el('span', 'rc-p');
-      b.type = 'button';
-      b.dataset.act = 'recent';
-      b.dataset.path = it.path;
-      b.disabled = busy;
-      // The path breaks only after "\" or "/", like the one in the project header. A name built from those parts
-      // would have spaces between them ("C:\ Users\ …"), so the button's name is given whole.
-      p.innerHTML = pathHtml(it.path);
-      b.setAttribute('aria-label', n + ' ' + it.path);
-      t.append(el('span', 'rc-n', n), p);
-      b.append(icon('ti-folder'), t);
-      rows.appendChild(b);
-    });
-    box.hidden = false;
+    items.forEach(it => rows.appendChild(it.kind === 'github' ? ghRecent(it) : folderRecent(it)));
+    box.hidden = !items.length;
+    return items;
+  }
+  // An item of /api/recent: {path, name, at} is a folder (no kind), {kind: 'github', owner, repo, branch, private, name} a repo.
+  function recentItem(it) {
+    if (!it || typeof it !== 'object') return null;
+    if (it.kind === 'github') {
+      const b = it.branch == null ? '' : it.branch;
+      return ghName(it.owner, it.repo) && ghBranch(b) ? {kind: 'github', owner: it.owner, repo: it.repo, branch: b, private: it.private === true, name: str(it.name) || it.repo} : null;
+    }
+    if (it.kind != null && it.kind !== 'local') return null;
+    return typeof it.path === 'string' && it.path ? {kind: 'path', path: it.path, name: str(it.name) || baseName(it.path)} : null;
+  }
+  function folderRecent(it) {
+    const b = el('button', 'rc'), t = el('span', 'rc-t'), p = el('span', 'rc-p');
+    b.type = 'button';
+    b.dataset.act = 'recent';
+    b.dataset.path = it.path;
+    b.disabled = busy;
+    // The path breaks only after "\" or "/", like the one in the project header. A name built from those parts
+    // would have spaces between them ("C:\ Users\ …"), so the button's name is given whole.
+    p.innerHTML = pathHtml(it.path);
+    b.setAttribute('aria-label', it.name + ' ' + it.path);
+    t.append(el('span', 'rc-n', it.name), p);
+    b.append(icon('ti-folder'), t);
+    return b;
+  }
+  // A repo row reads like a folder row: the repo's name, then "GitHub · owner/repo · branch" where a folder has its
+  // path. A private repo stays (also while its login is gone) and shows a lock.
+  function ghRecent(it) {
+    const b = el('button', 'rc'), t = el('span', 'rc-t'), p = el('span', 'rc-p', ghLine(it));
+    b.type = 'button';
+    b.dataset.act = 'recent';
+    b.dataset.kind = 'github';
+    b.dataset.owner = it.owner;
+    b.dataset.repo = it.repo;
+    b.dataset.branch = it.branch;
+    b.disabled = busy;
+    if (it.private) { const k = el('span', 'rc-lk', '비공개'); k.prepend(icon('ti-lock')); p.append(' · ', k); } // kept whole
+    b.setAttribute('aria-label', `${it.name} GitHub ${it.owner}/${it.repo}${it.branch ? ` ${it.branch} 브랜치` : ''}${it.private ? ' 비공개' : ''}`);
+    t.append(el('span', 'rc-n', it.name), p);
+    b.append(icon('ti-brand-github'), t);
+    return b;
   }
 
+  // While a project opens, the start screen's controls wait. Controls marked data-keep stay usable (a download's 멈추기).
+  function lock(on) {
+    busy = on;
+    app.querySelectorAll('.st button, .st input, .st select').forEach(b => { if (!b.hasAttribute('data-keep')) b.disabled = on; });
+    if (gh) gh.paint();
+  }
+  // A folder (or the example) opening: lock(), with the line in the folder card.
   function setBusy(msg, name) {
-    busy = !!msg;
-    app.querySelectorAll('.st button, .st input').forEach(b => { b.disabled = busy; });
+    lock(!!msg);
     const m = app.querySelector('.st-msg');
     if (!m) return;
     m.textContent = '';
@@ -185,11 +254,33 @@
     }
   }
 
-  function showError(msg) {
+  // e: the error, when there is one. A GitHub run's error gets its "GitHub · owner/repo · branch" line, and for some codes
+  // a way on: log in first (also for not_found while logged out, whose sentence says a private repo needs the login),
+  // or the app's settings on GitHub (where the repos it may read are chosen, a suspended installation is turned back
+  // on, or the app is installed on another account). Those replies carry install_url.
+  const GH_APP_CODES = ['not_installed', 'not_allowed', 'suspended', 'other_owner'];
+  function showError(msg, e) {
     leave();
     screen = 'error';
     document.title = 'CodeVision';
     app.innerHTML = `<section class="st">${BRAND}<div class="card er" role="alert"><div class="er-hd"><i class="ti ti-alert-circle" aria-hidden="true"></i><span class="er-msg"></span></div><div class="er-path"></div><div class="er-row"><button type="button" class="pri" data-act="retry"><i class="ti ti-refresh" aria-hidden="true"></i>다시 시도</button><button type="button" data-act="home"><i class="ti ti-arrow-left" aria-hidden="true"></i>처음 화면으로</button></div></div></section>`;
+    if (last && last.kind === 'github') {
+      const code = e && e.code || '', row = app.querySelector('.er-row'), home = row.lastChild;
+      app.querySelector('.er-msg').textContent = str(msg);
+      app.querySelector('.er-path').textContent = ghLine(last);
+      if (code === 'login_needed' || code === 'private_login' || (code === 'not_found' && !!ghLast && !ghLast.in)) {
+        const b = el('button', '', '로그인하러 가기');
+        b.type = 'button';
+        b.dataset.act = 'gh-login';
+        b.prepend(icon('ti-brand-github'));
+        row.insertBefore(b, home);
+      } else if (GH_APP_CODES.includes(code)) {
+        const u = ghUrl(e.data && e.data.install_url, !!ghLast && ghLast.fake) || (ghLast ? ghLast.install : '');
+        if (u) row.insertBefore(ghLink(u, 'GitHub 앱 설정 열기', 'btn'), home);
+      }
+      focusTo('[data-act="retry"]');
+      return;
+    }
     const p = !last ? '' : last.kind === 'path' ? last.path : last.kind === 'demo' ? '예제 프로젝트' : '';
     const m = str(msg), at = named(m, p), em = app.querySelector('.er-msg');
     // A path in the message breaks only after "\" or "/", like the one in the project header (app.css .er-p).
@@ -200,12 +291,14 @@
     focusTo('[data-act="retry"]');
   }
 
-  // r: {kind: 'path', path} | {kind: 'demo'} | {kind: 'pick'} | {kind: 'boot'}
+  // r: {kind: 'path', path} | {kind: 'demo'} | {kind: 'pick'} | {kind: 'boot'} | {kind: 'github', owner, repo, branch} (runGh)
   async function run(r) {
     if (busy) return;
     last = r;
     if (r.kind === 'boot') { showProject(window.CV_BOOT_GRAPH); return; }
-    if (screen !== 'start') showStart(screen ? '.st-name' : ''); // its buttons are about to be disabled
+    // its buttons are about to be disabled; a repo's progress is in the GitHub card
+    if (screen !== 'start') showStart(!screen ? '' : r.kind === 'github' ? '#cv-gh-h' : '.st-name');
+    if (r.kind === 'github') { runGh(r); return; }
     if (r.kind === 'pick') {
       setBusy('폴더 선택 창에서 분석할 폴더를 골라 주세요.');
       let j;
@@ -224,7 +317,7 @@
     setBusy('분석 중이에요…', demo ? '예제 프로젝트' : baseName(r.path));
     let g;
     try {
-      g = await api(demo ? '/api/analyze?demo=1' : '/api/analyze?path=' + encodeURIComponent(r.path));
+      g = await api(analyzeUrl(r));
     } catch (e) {
       setBusy(null);
       showError(e.message);
@@ -271,14 +364,23 @@
     const warns = list(G.warnings).map(str).filter(Boolean);
     if (G.truncated && !warns.length) warns.push(TRUNC);
 
-    // One run of text, so the path follows "로컬 폴더 ·" on the same line and wraps between its parts.
-    let h = `<div class="cv"><div class="src"><span class="src-t"><i class="ti ti-folder" aria-hidden="true"></i><span class="src-k">${src.kind === 'demo' ? '예제 프로젝트' : '로컬 폴더'}</span>`;
-    if (src.path) h += ` <span class="src-p">${pathHtml(src.path)}</span>`; // the space: for copying and screen readers
+    // One run of text, so the path follows "로컬 폴더 ·" on the same line and wraps between its parts. A repo reads
+    // "GitHub · owner/repo · branch"; its short commit is only in the tooltip and for screen readers.
+    const git = src.kind === 'github';
+    let h = `<div class="cv"><div class="src"><span class="src-t"><i class="ti ${git ? 'ti-brand-github' : 'ti-folder'}" aria-hidden="true"></i>`
+      + `<span class="src-k">${git ? 'GitHub' : src.kind === 'demo' ? '예제 프로젝트' : '로컬 폴더'}</span>`;
+    if (git) {
+      const sha7 = str(src.sha).slice(0, 7);
+      h += ` <span class="src-p">${pathHtml(str(src.owner) + '/' + str(src.repo))}</span>`; // breaks only after the "/"
+      if (str(src.branch)) h += ` <span class="src-b"${sha7 ? ` title="커밋 ${esc(sha7)}"` : ''}>${esc(src.branch)}</span>`;
+      if (sha7) h += `<span class="sr-only">, 커밋 ${esc(sha7)}</span>`;
+      if (src.private === true) h += '<i class="ti ti-lock src-l" aria-hidden="true"></i><span class="sr-only">, 비공개 저장소</span>';
+    } else if (src.path) h += ` <span class="src-p">${pathHtml(src.path)}</span>`; // the space: for copying and screen readers
     h += '</span>';
     // The AI chip opens the AI panel under it (a sheet on phones); aiCtl fills in both.
     h += '<div class="src-r"><button type="button" class="bd tc ai" data-act="ai" aria-haspopup="dialog" aria-expanded="false" aria-controls="cv-ai">'
       + `<i class="ti ti-sparkles" aria-hidden="true"></i><span>AI 설명 꺼짐</span></button>${AI_PANEL}`
-      + '<button type="button" class="chip" data-act="home">다른 폴더</button></div></div>';
+      + '<button type="button" class="chip" data-act="home">다른 프로젝트</button></div></div>';
 
     h += `<div class="ttl"><i class="ti ti-folder-open" aria-hidden="true"></i><h1 tabindex="-1">${esc(projName(G))}</h1>`
       + `<span class="ttl-s">폴더 ${fmt(st.folders)} · 파일 ${fmt(st.files)} · 시작점 ${fmt(st.entries)} · 정리 후보 ${fmt(st.orphans)}</span>`;
@@ -961,7 +1063,8 @@
 
   function aiCtl(G) {
     const src = G.source && typeof G.source === 'object' ? G.source : {};
-    const proj = src.kind === 'demo' ? 'demo' : txt(src.path); // the project, as /api/ai/ calls name it
+    // the project, as /api/ai/ calls name it ('github:owner/repo@sha' for a repo's snapshot)
+    const proj = src.kind === 'github' ? txt(src.project) : src.kind === 'demo' ? 'demo' : txt(src.path);
     const errs = dict(), pend = new Map(); // errs: node -> {msg, code, last (the server will not explain it), busy}
     let st = aiStatus(G.ai), V = null, dead = false, stamp = 0, applied = 0, gen = 0, xReq = 0;
     let chip = null, pop = null, back = null, P = null, open = false, ask = false, busy = '', err = '', refreshing = false;
@@ -1096,7 +1199,7 @@
       const k = ++xReq, kg = gen; // kg: the model it was asked with (see want)
       refreshing = true;
       paint();
-      api(proj === 'demo' ? '/api/analyze?demo=1' : '/api/analyze?path=' + encodeURIComponent(proj)).then(g => {
+      api(analyzeUrl(src.kind === 'github' ? src : proj === 'demo' ? {kind: 'demo'} : {kind: 'path', path: proj})).then(g => {
         if (dead || k !== xReq) return;
         refreshing = false;
         const N = g && g.nodes && typeof g.nodes === 'object' ? g.nodes : {};
@@ -1463,6 +1566,846 @@
     return {on, use, row, want, attach, act, key, down, media, quit, toggle() { if (open) close(true); else openP(); }};
   }
 
+  // ---------- GitHub: the start screen's card (ghCtl) and opening a repo (runGh) ----------
+  // Only the server talks to GitHub (docs/architecture.md 6-1). The card shows what GET /api/github/status says: logged
+  // out (GitHub로 로그인 and the public-repo form), a login on its way (the code to put in on GitHub, with its countdown),
+  // or logged in (the repos with search and paging, the branch select, 로그아웃). Every GitHub page it links to (the code
+  // page, the app's install page, the settings) comes from that status block; no GitHub address is written here.
+  // Account, repo and branch names are other people's text: they go in through textContent (or esc) only.
+  // ms to wait for each call (the server's own GitHub timeouts are shorter, so its sentence comes first)
+  const GH_MS = {status: 10000, login: 30000, cancel: 10000, logout: 30000, repos: 60000, branches: 30000, resolve: 30000, open: 60000, job: 10000};
+  const GH_POLL = 2000, GH_JOB = 1000, GH_PAGE = 8; // ms between status checks during a login, and between job checks; repos per page
+  const GH_OWNER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$/, GH_REPO = /^[A-Za-z0-9._-]{1,100}$/, GH_SHA = /^[0-9a-f]{40}$/;
+  const ghName = (o, r) => typeof o === 'string' && typeof r === 'string' && GH_OWNER.test(o) && GH_REPO.test(r) && r !== '.' && r !== '..';
+  // A branch name by git's own rules, as the server checks them (github.base.valid_branch): no control characters, space
+  // or ~^:?*[\, no '..', '@{' or '//', not '@', no '-' or '/' first, no '/' or '.' last, no part that starts with '.' or
+  // ends with '.lock'. '' is the default branch. So an address with a branch git would refuse is dropped, not opened.
+  const ghBranch = b => typeof b === 'string' && b.length <= 255 && (!b || (!/[\x00-\x20\x7f~^:?*[\\]|\.\.|@\{|\/\/|^[-/]|[/.]$/.test(b)
+    && b !== '@' && !b.split('/').some(p => p[0] === '.' || p.endsWith('.lock')) && !/[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(b)));
+  const sameRepo = (a, b) => !!a && !!b && lc(a.owner) === lc(b.owner) && lc(a.repo) === lc(b.repo);
+  const ghLine = r => 'GitHub · ' + r.owner + '/' + r.repo + (r.branch ? ' · ' + r.branch : '');
+  // A GitHub page from the status block, opened in a new tab: https only, or the test fake on this computer.
+  const ghUrl = (u, fake) => (typeof u === 'string' && (/^https:\/\/[^\s"'<>\\]+$/.test(u)
+    || (!!fake && /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?\/[^\s"'<>\\]*$/.test(u))) ? u : '');
+  // How a login ended, when the server sent no sentence (by flow.state, or by flow.code when it failed).
+  const GH_END = {expired: '코드를 넣을 시간이 지났어요. 새 코드를 받아 주세요.',
+    denied: "GitHub에서 로그인을 허락하지 않았어요. 다시 하려면 'GitHub로 로그인'을 눌러 주세요.", cancelled: '로그인을 멈췄어요.',
+    login_code: '로그인 코드가 맞지 않아요. 새 코드를 받아 주세요.', unverified_email: 'GitHub 계정의 이메일 인증을 마친 뒤 다시 로그인해 주세요.',
+    login_config: 'CodeVision의 GitHub 로그인 설정에 문제가 있어요. CodeVision을 최신 버전으로 바꾼 뒤 다시 해 주세요.',
+    failed: 'GitHub에 연결하지 못했어요. 인터넷 연결을 확인한 뒤 다시 해 주세요.'};
+  const endText = k => (own(GH_END, k) ? GH_END[k] : GH_END.failed);
+  // ghLast: the last status block (while logged in, the next start screen puts the card first). ghRun: the repo opening
+  // now (runGh), drawn by the card. ghTyped: the public form's text across screens. recentItems: see loadRecent.
+  let ghLast = null, ghRun = null, ghN = 0, ghTyped = '', recentItems = [];
+
+  // "1.2MB", "340KB"
+  function size(b) {
+    b = num(b);
+    if (b < 1048576) return fmt(b ? Math.max(1, Math.round(b / 1024)) : 0) + 'KB';
+    const m = b / 1048576;
+    return m < 1024 ? (m < 10 ? m.toFixed(1) : fmt(m)) + 'MB' : (m / 1024).toFixed(1) + 'GB';
+  }
+  // "업데이트 3일 전" from GitHub's pushed_at, counted in this computer's calendar days
+  function pushed(t) {
+    const d = new Date(str(t));
+    if (!t || isNaN(d.getTime())) return '';
+    const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const n = Math.round((day(new Date()) - day(d)) / 864e5);
+    return n <= 0 ? '업데이트 오늘' : n === 1 ? '업데이트 어제' : n < 30 ? `업데이트 ${n}일 전` : `업데이트 ${d.getFullYear()}. ${d.getMonth() + 1}. ${d.getDate()}.`;
+  }
+  // The status block: GET /api/github/status, and the reply of login, login/cancel and logout.
+  function ghStatus(j) {
+    j = j && typeof j === 'object' ? j : {};
+    const f = j.flow && typeof j.flow === 'object' ? j.flow : null, fake = j.fake === true;
+    const ok = f && ['waiting', 'finishing', 'done', 'denied', 'expired', 'failed', 'cancelled'].includes(f.state);
+    return {
+      in: j.logged_in === true, login: txt(j.login), note: txt(j.note), fake, install: ghUrl(j.install_url, fake), settings: ghUrl(j.settings_url, fake),
+      flow: ok ? {state: f.state, code: txt(f.user_code), uri: str(f.verification_uri), left: Number.isFinite(+f.expires_in) ? Math.max(0, +f.expires_in) : 0,
+        message: txt(f.message), err: str(f.code)} : null,
+      job: ghJob(j.job)
+    };
+  }
+  // A download job block (open, job, job/cancel, status.job), or open's own "done" block (job "", cached or offline).
+  // note: '' or the server's sentence about the branch (one opened before is gone, so the default branch was opened).
+  function ghJob(j) {
+    if (!j || typeof j !== 'object') return null;
+    const s = ['running', 'done', 'cancelled', 'failed'].includes(j.state) ? j.state : '';
+    if (!s || (s === 'running' && !str(j.job))) return null;
+    return {id: str(j.job), state: s, phase: str(j.phase), owner: str(j.owner), repo: str(j.repo), branch: str(j.branch), sha: str(j.sha),
+      read: num(j.read), total: num(j.total), files: num(j.files), message: txt(j.message), code: str(j.code), cached: j.cached === true,
+      offline: j.offline === true, note: txt(j.note)};
+  }
+  function ghRepos(j) {
+    const out = [], seen = new Set();
+    list(j && j.repos).forEach(r => {
+      if (!r || typeof r !== 'object' || !ghName(r.owner, r.repo) || seen.has(lc(r.owner + '/' + r.repo))) return;
+      seen.add(lc(r.owner + '/' + r.repo));
+      out.push({owner: r.owner, repo: r.repo, private: r.private === true, def: ghBranch(r.default_branch) ? r.default_branch : '',
+        pushed: str(r.pushed_at), archived: r.archived === true, big: r.too_big === true});
+    });
+    // note: the server's sentences about what the list leaves out (a suspended installation) and the hint that an
+    // organization's owner may have to approve an install (nothing installed or listed); shown as an info line
+    return {installed: !j || j.installed !== false, login: txt(j && j.login), list: out, truncated: !!j && j.truncated === true, note: txt(j && j.note)};
+  }
+  const ghBranches = v => { const s = new Set(); return list(v).map(b => (b && typeof b === 'object' ? b.name : null)).filter(n => n && ghBranch(n) && !s.has(n) && s.add(n)); };
+  const recentBranch = r => { const it = recentItems.find(x => x.kind === 'github' && sameRepo(x, r)); return it ? it.branch : ''; };
+  // The login code to the clipboard (127.0.0.1 is a secure context, but a page without the focus can still be refused).
+  function copyText(t) {
+    try { return navigator.clipboard.writeText(t).then(() => true, () => false); } catch (e) { return Promise.resolve(false); }
+  }
+  function ghLink(u, t, cls) {
+    const a = el('a', cls, t);
+    a.href = u;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.prepend(icon('ti-external-link'));
+    return a;
+  }
+
+  // The card is built once per start screen, every part in place and hidden or shown (ghCtl paint), like the AI panel.
+  const GH_SPIN = '<i class="ti ti-loader-2 spin" aria-hidden="true"></i>';
+  const GH_ERR = k => `<div class="gh-err" data-err="${k}" hidden><p role="alert"></p><button type="button" class="sbtn" data-gh="retry"><i class="ti ti-refresh" aria-hidden="true"></i>다시 시도</button></div>`;
+  // install_url: the app's page on GitHub, where it is installed and where the repos it may read are chosen
+  const GH_APP = (t, cls) => `<a class="gh-ia ${cls}" target="_blank" rel="noopener noreferrer"><i class="ti ti-external-link" aria-hidden="true"></i>${t}</a>`;
+  const GH_PUB = '<div class="gh-pubw"><form class="gh-pub" novalidate><label class="st-lab" for="cv-gh-repo">공개 저장소 주소</label>'
+    + '<div class="st-in"><input id="cv-gh-repo" type="text" spellcheck="false" autocomplete="off" placeholder="예: octocat/Hello-World"><button type="submit">열기</button></div></form>'
+    + `<p class="gh-pw" hidden>${GH_SPIN}<span>저장소를 확인하고 있어요…</span></p>${GH_ERR('pub')}<div class="gh-brp"></div></div>`;
+  // the branch row, under the repo list or under the public form (whichever chose the repo)
+  const GH_BR = `<div class="gh-br" hidden><p class="gh-sel">선택한 저장소: <span class="gh-nm"></span></p><p class="gh-bn" hidden>${GH_SPIN}<span></span></p>`
+    + '<label class="st-lab" for="cv-gh-br"><i class="ti ti-git-branch" aria-hidden="true"></i>브랜치</label>'
+    + `<div class="gh-brr"><select id="cv-gh-br"></select><button type="button" class="pri" data-gh="go">열기</button></div>${GH_ERR('br')}</div>`;
+  const GH_CARD = '<section class="card gh" aria-labelledby="cv-gh-h">'
+    + '<h2 id="cv-gh-h" class="gh-h" tabindex="-1"><i class="ti ti-brand-github" aria-hidden="true"></i>GitHub 저장소</h2>'
+    + '<p class="gh-msg" role="status"></p>'
+    + '<p class="gh-lod" hidden><a class="lnk" target="_blank" rel="noopener noreferrer">GitHub 설정 열기<i class="ti ti-external-link" aria-hidden="true"></i></a></p>'
+    // the repo opening now (runGh), and a download the server is already busy with
+    + `<div class="gh-prog" hidden><p class="gh-pt">${GH_SPIN}<span class="gh-ps" role="status"></span><span class="gh-pn"></span></p><p class="gh-pf"></p>`
+    + '<div class="gh-bar" role="progressbar" aria-label="저장소 받기 진행 상황" aria-valuemin="0" hidden><span></span></div>'
+    + '<div class="gh-acts" hidden><button type="button" data-gh="stop" data-keep>멈추기</button></div></div>'
+    + '<div class="gh-oth" hidden><p>다른 저장소를 받고 있어요: <span class="gh-nm"></span></p>'
+    + '<div class="gh-acts"><button type="button" class="pri" data-gh="follow">이어서 보기</button><button type="button" data-gh="halt">멈추기</button></div></div>'
+    // ?github= with a repo this PC has not opened: one click to open it
+    + '<div class="gh-ask" hidden><p>이 저장소를 열까요?</p><p class="gh-nm"></p>'
+    + '<div class="gh-acts"><button type="button" class="pri" data-gh="ask">열기</button><button type="button" data-gh="noask">취소</button></div></div>'
+    + GH_ERR('top') + '<p class="gh-info" hidden><i class="ti ti-info-circle" aria-hidden="true"></i><span></span></p>'
+    // logged out
+    + '<div class="gh-out" hidden><p class="gh-intro">내 저장소를 열려면 GitHub로 로그인해 주세요. 공개 저장소는 로그인하지 않아도 열 수 있어요.</p>'
+    + '<div class="gh-acts"><button type="button" class="pri" data-gh="login"><i class="ti ti-brand-github" aria-hidden="true"></i><span>GitHub로 로그인</span></button></div>'
+    + `<p class="gh-note">CodeVision은 고른 저장소를 읽기만 해요. 저장소를 바꾸거나 올리지 않아요.</p><div class="gh-pubo">${GH_PUB}</div></div>`
+    // the code to put in on GitHub's page
+    + '<div class="gh-flow" hidden><p class="gh-hint" id="cv-gh-hint" role="status"></p>'
+    + '<div class="gh-cb"><p class="gh-code" tabindex="-1" role="group" aria-labelledby="cv-gh-code" aria-describedby="cv-gh-hint"><span aria-hidden="true"></span>'
+    + '<span class="sr-only" id="cv-gh-code"></span></p><p class="gh-timer"></p></div>'
+    + '<div class="gh-acts"><button type="button" data-gh="copy"><i class="ti ti-copy" aria-hidden="true"></i><span>코드 복사</span></button>'
+    + '<a class="btn gh-vf" target="_blank" rel="noopener noreferrer"><i class="ti ti-external-link" aria-hidden="true"></i>GitHub 열기</a>'
+    + '<button type="button" data-gh="cancel">취소</button></div>'
+    + '<p class="gh-warn"><i class="ti ti-alert-triangle" aria-hidden="true"></i><span>CodeVision 화면이 방금 보여 준 코드만 넣으세요. 메일·메시지·다른 사이트가 알려 준 코드는 넣지 마세요.</span></p>'
+    + "<ol class=\"gh-steps\"><li>열린 GitHub 창에 코드를 넣고 'Continue'를 눌러 주세요. GitHub에 로그인하라고 나오면 먼저 로그인해 주세요.</li>"
+    + "<li>다음 화면에서 'Authorize CodeVision-Project-Jun'을 눌러 주세요.</li><li>허락한 뒤 이 화면으로 돌아오면 저절로 이어져요. GitHub 창에 '404' 페이지가 보여도 괜찮아요.</li></ol>"
+    + `<p class="gh-wait">${GH_SPIN}<span></span></p></div>`
+    // logged in
+    + '<div class="gh-in" hidden><div class="gh-acct"><span class="gh-who"></span><button type="button" class="chip" data-gh="logout">로그아웃</button></div>'
+    + '<div class="gh-lo" hidden><p>로그아웃할까요? 이 PC에 받아 둔 비공개 저장소도 함께 지워요.</p>'
+    + '<div class="gh-acts"><button type="button" class="pri" data-gh="out">로그아웃</button><button type="button" data-gh="stay">취소</button></div></div>'
+    + `<p class="gh-load" hidden>${GH_SPIN}<span>저장소 목록을 불러오고 있어요…</span></p>`
+    + '<div class="gh-ni" hidden><p>CodeVision GitHub 앱이 아직 설치되지 않았어요. 앱을 설치하면서 열어 볼 저장소를 고를 수 있어요.</p>'
+    + "<p class=\"gh-note\">GitHub 웹사이트에서 CodeVision이 읽을 저장소를 고르는 단계예요. PC에 설치하는 프로그램이 아니에요. 설치 화면에서 'Only select repositories'를 고르면 CodeVision은 고른 저장소만 읽을 수 있어요.</p>"
+    + `<div class="gh-acts">${GH_APP('GitHub 앱 설치하기', 'btn pri')}<button type="button" data-gh="reload"><i class="ti ti-refresh" aria-hidden="true"></i>다시 불러오기</button></div>`
+    + "<p class=\"gh-note\">설치를 마쳤으면 '다시 불러오기'를 눌러 주세요.</p></div>"
+    + '<div class="gh-none" hidden><p>CodeVision 앱이 읽을 수 있는 저장소가 아직 없어요. GitHub 앱 설정에서 저장소를 골라 주세요.</p>'
+    + `<div class="gh-acts">${GH_APP('GitHub 앱 설정 열기', 'btn')}<button type="button" data-gh="reload"><i class="ti ti-refresh" aria-hidden="true"></i>다시 불러오기</button></div></div>`
+    // the repo list's note: a suspended installation, the organization hint (the server's sentences, as sent)
+    + '<p class="gh-info gh-rn" hidden><i class="ti ti-info-circle" aria-hidden="true"></i><span></span></p>'
+    + '<div class="gh-ls" hidden><label class="st-lab" for="cv-gh-q">저장소 찾기</label>'
+    + '<input id="cv-gh-q" class="gh-q" type="search" spellcheck="false" autocomplete="off" placeholder="이름으로 찾기">'
+    + '<p class="gh-cnt" aria-live="polite"></p><p class="gh-tr" hidden></p><div class="gh-list"></div><button type="button" class="gh-more" data-gh="more" hidden></button>'
+    + `<div class="gh-brl">${GH_BR}</div>`
+    + '<div class="gh-acts"><button type="button" data-gh="refresh"><i class="ti ti-refresh" aria-hidden="true"></i>목록 새로 고침</button></div>'
+    + '<p class="gh-note">찾는 저장소가 목록에 없나요? GitHub 앱 설정에서 저장소를 더 고를 수 있어요. '
+    + '<a class="gh-ia lnk" target="_blank" rel="noopener noreferrer">GitHub 앱 설정 열기<i class="ti ti-external-link" aria-hidden="true"></i></a></p></div>'
+    + '<details class="gh-pubd"><summary>다른 공개 저장소 열기</summary><div class="gh-pubi"></div></details></div>'
+    + '</section>';
+
+  // The GitHub card. fc: 'login' puts the focus on 'GitHub로 로그인' (the heading, when logged in) once the first status is in.
+  function ghCtl(fc) {
+    let st = null, dead = false, C = null, sReq = 0, sT = 0, sFails = 0, tickT = 0, annT = 0, cpT = 0, until = 0;
+    // code: the login code on screen; copied: null while it is being copied; mine: this page asked for that login (so it
+    // may copy the code and open GitHub by itself); again: '새 코드 받기'; after: the settings link after a logout;
+    // ask: a repo from the address (?github=) that waits for one click; want: where the focus goes once it can (target)
+    let code = '', copied = null, mine = false, again = false, warned = false, after = false, ask = null, want = fc || '';
+    let msg = '', E = {at: '', text: '', retry: null, kind: ''}; // the status line, and the one alert line on screen (at: top, br, pub)
+    let repos = null, rReq = 0, rBusy = false, q = '', page = GH_PAGE, rowsK = '';
+    // sel: the chosen repo, from the list or the public form; br: its branches (list: null until they come)
+    let sel = null, br = null, bReq = 0, optK = '', optFor = null, pBusy = false, iBusy = false, oBusy = false, lo = false;
+
+    // '' until the first status, then the view: 'out', 'flow' (a login on its way) or 'in'
+    const mode = () => (!st ? '' : st.flow && (st.flow.state === 'waiting' || st.flow.state === 'finishing') ? 'flow' : st.in ? 'in' : 'out');
+
+    // ----- the status block: read once, then every 2 s while a login (or a download the server runs) goes on -----
+    function load() {
+      clearTimeout(sT);
+      sT = 0;
+      const k = ++sReq;
+      api('/api/github/status', 'GET', null, GH_MS.status).then(j => {
+        if (dead || k !== sReq) return;
+        sFails = 0;
+        if (E.kind === 'status') clearErr();
+        take(j);
+      }, e => {
+        if (dead || k !== sReq) return;
+        sFails++;
+        if (!st) setErr(e.message, load, 'top', 'status');
+        paint();
+        schedule();
+      });
+    }
+    function schedule() {
+      clearTimeout(sT);
+      sT = 0;
+      const other = !!st && !!st.job && st.job.state === 'running' && !ghRun; // a download this page does not follow itself
+      if (dead || (st && mode() !== 'flow' && !other)) return; // nothing changes by itself
+      sT = setTimeout(load, sFails ? Math.min(10000, GH_POLL * 2 ** sFails) : GH_POLL);
+    }
+    function take(j) {
+      const wm = mode(), was = st;
+      st = ghLast = ghStatus(j);
+      const m = mode(), f = st.flow;
+      if (m === 'flow' && f.state === 'waiting') {
+        until = Date.now() + f.left * 1000; // the countdown, set again on every check
+        if (f.code && f.code !== code) enter(f);
+      }
+      if (m === 'flow' && !tickT) tickT = setInterval(timer, 1000);
+      if (m !== 'flow') { clearInterval(tickT); tickT = 0; }
+      if (wm === 'flow' ? m !== 'flow' : mine && m !== 'flow') ended(f); // also a login that ended at once
+      mine = false;
+      if (m === 'in' && wm !== 'in' && !repos && !rBusy) loadRepos(false); // once; after a failure, 다시 시도 asks again
+      if (m !== 'in') { repos = null; rReq++; rBusy = false; lo = false; if (sel && sel.from === 'list') sel = br = null; }
+      if (st.in && (!was || !was.in)) order();
+      paint();
+      schedule();
+    }
+    // A new code. The page that asked for it copies it, and only then opens GitHub's page, once. Both are best effort
+    // (a browser may refuse them after the wait for the server), so the hint and both buttons stay. A code first seen
+    // after a reload is neither copied nor opened, and the focus stays where it is.
+    function enter(f) {
+      code = f.code;
+      copied = null;
+      warned = false;
+      msg = '';
+      clearErr();
+      if (!mine) { copied = false; return; }
+      want = 'code';
+      copyText(f.code).then(ok => {
+        if (dead || code !== f.code) return;
+        copied = ok;
+        const u = ok ? ghUrl(f.uri, st.fake) : '';
+        if (u) { try { window.open(u, '_blank', 'noopener,noreferrer'); } catch (e) { /* a popup blocker */ } }
+        paint();
+      });
+    }
+    // The login is over: logged in (the repo list comes), or how it ended without a login.
+    function ended(f) {
+      code = '';
+      if (st.in) { note((f && f.state === 'done' && f.message) || 'GitHub에 로그인했어요.'); want = 'list'; return; }
+      const s = f ? f.state : '';
+      if (!s || s === 'done') return;
+      const t = f.message || endText(s === 'failed' ? f.err : s);
+      again = s === 'expired' || (s === 'failed' && f.err === 'login_code');
+      if (s === 'failed') { msg = ''; setErr(t, null, 'top', 'flow'); } else note(t);
+      want = 'login';
+    }
+    function timer() {
+      const f = st && st.flow;
+      if (dead || !C || !f || f.state !== 'waiting') return;
+      const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+      putT(C.timer, `남은 시간 ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`);
+      if (left <= 60 && left > 0 && !warned) { warned = true; note('코드를 넣을 시간이 1분 남았어요.'); } // the countdown itself is not announced
+    }
+
+    // ----- the lines: the status line (role=status), and one alert line (role=alert) at the top, under the branch row or
+    // under the public form, beside what failed. A sentence goes in 50 ms after its line was emptied, so the same
+    // sentence twice is heard twice. -----
+    function note(t) { msg = t; if (C) C.msg.textContent = ''; later(); }
+    function setErr(t, retry, at, kind) {
+      E = {text: str(t), retry: retry || null, at: at || 'top', kind: kind || ''};
+      if (C) Object.keys(C.err).forEach(k => { C.err[k].p.textContent = ''; });
+      later();
+    }
+    function clearErr() { E = {at: '', text: '', retry: null, kind: ''}; }
+    function later() {
+      clearTimeout(annT);
+      annT = setTimeout(() => { annT = 0; paint(); }, 50);
+    }
+
+    // ----- login and logout -----
+    function login() {
+      if (iBusy || mode() !== 'out') return;
+      iBusy = true;
+      again = false;
+      clearErr();
+      note('로그인 코드를 받고 있어요…');
+      api('/api/github/login', 'POST', {}, GH_MS.login).then(j => {
+        if (dead) return;
+        iBusy = false;
+        msg = '';
+        mine = true;
+        take(j);
+      }, e => {
+        if (dead) return;
+        iBusy = false;
+        msg = '';
+        // Logged in meanwhile (another tab, or a login this card had not seen yet): no retry, the card catches up.
+        if (e.code === 'already_logged_in') { note(e.message); want = 'list'; load(); return; }
+        setErr(e.message, login, 'top', 'login');
+        paint();
+      });
+    }
+    function cancel() {
+      api('/api/github/login/cancel', 'POST', {}, GH_MS.cancel).then(j => { if (!dead) take(j); }, e => {
+        if (dead) return;
+        setErr(e.message, cancel, 'top');
+        paint();
+      });
+    }
+    function copy() {
+      const f = st && st.flow;
+      if (!f || !f.code) return;
+      copyText(f.code).then(ok => {
+        if (dead) return;
+        note(ok ? '코드를 복사했어요.' : '복사하지 못했어요. 코드를 직접 적어 주세요.');
+        putA(C.copyI, 'class', 'ti ' + (ok ? 'ti-check' : 'ti-copy'));
+        clearTimeout(cpT);
+        cpT = setTimeout(() => { if (!dead) putA(C.copyI, 'class', 'ti ti-copy'); }, 2000);
+      });
+    }
+    // Logout always deletes the private repos downloaded on this PC, as its question says.
+    function logout() {
+      if (oBusy) return;
+      oBusy = true;
+      clearErr();
+      paint();
+      api('/api/github/logout', 'POST', {delete_private: true}, GH_MS.logout).then(j => {
+        if (dead) return;
+        oBusy = false;
+        lo = false;
+        sel = br = null;
+        take(j);
+        after = true;
+        note(txt(j.message) || '로그아웃했어요.');
+        want = 'login';
+        loadRecent(); // without the private repos now
+        paint();
+      }, e => {
+        if (dead) return;
+        oBusy = false;
+        setErr(e.message, logout, 'top');
+        paint();
+      });
+    }
+
+    // ----- repos and branches -----
+    function loadRepos(refresh) {
+      const k = ++rReq;
+      rBusy = true;
+      if (E.kind === 'repos') clearErr();
+      paint();
+      api('/api/github/repos' + (refresh ? '?refresh=1' : ''), 'GET', null, GH_MS.repos).then(j => {
+        if (dead || k !== rReq) return;
+        rBusy = false;
+        repos = ghRepos(j);
+        if (sel && sel.from === 'list' && !repos.list.some(r => sameRepo(r, sel))) sel = br = null;
+        paint();
+      }, e => {
+        if (dead || k !== rReq) return;
+        rBusy = false;
+        if (e.status === 401) { // login_needed: the login is gone (its refresh failed), so the card is logged out
+          st = ghLast = Object.assign({}, st, {in: false});
+          repos = null;
+          if (sel && sel.from === 'list') sel = br = null;
+          note(e.message);
+          want = 'login';
+        } else setErr('저장소 목록을 불러오지 못했어요. ' + e.message, () => loadRepos(refresh), 'top', 'repos');
+        paint();
+      });
+    }
+    function pick(k) {
+      const r = repos && repos.list.find(x => lc(x.owner + '/' + x.repo) === k);
+      if (!r) return;
+      if (r.big) { note('저장소가 너무 커서 CodeVision으로 받을 수 없어요.'); return; }
+      sel = {owner: r.owner, repo: r.repo, private: r.private, big: false, from: 'list'};
+      br = {list: null, def: r.def, pick: '', note: '', truncated: false, busy: false};
+      want = 'select';
+      loadBranches();
+    }
+    function loadBranches() {
+      if (!sel || !br) return;
+      const k = ++bReq, s = sel, b = br;
+      b.busy = true;
+      if (E.at === 'br') clearErr();
+      paint();
+      api('/api/github/branches?owner=' + encodeURIComponent(s.owner) + '&repo=' + encodeURIComponent(s.repo), 'GET', null, GH_MS.branches).then(j => {
+        if (dead || k !== bReq || br !== b) return;
+        b.busy = false;
+        b.list = ghBranches(j.branches);
+        if (j.default_branch && ghBranch(j.default_branch)) b.def = j.default_branch;
+        b.truncated = j.truncated === true;
+        paint();
+      }, e => {
+        if (dead || k !== bReq || br !== b) return;
+        b.busy = false;
+        setErr(e.message, loadBranches, 'br', 'branches');
+        paint();
+      });
+    }
+    // The public form: POST /api/github/resolve, then the same branch row as for the list.
+    function submit() {
+      if (!C || pBusy || busy) return;
+      const v = C.pubIn.value.trim();
+      if (!v) { setErr('열 저장소의 주소나 계정 이름/저장소 이름을 넣어 주세요.', null, 'pub'); paint(); C.pubIn.focus(); return; }
+      pBusy = true;
+      msg = '';
+      clearErr();
+      paint();
+      api('/api/github/resolve', 'POST', {text: v}, GH_MS.resolve).then(j => {
+        if (dead) return;
+        pBusy = false;
+        if (!ghName(j.owner, j.repo)) { setErr('요청을 처리하지 못했어요. 잠시 뒤에 다시 해 주세요.', submit, 'pub'); paint(); return; }
+        sel = {owner: j.owner, repo: j.repo, private: j.private === true, big: j.too_big === true, from: 'pub'};
+        br = {list: ghBranches(j.branches), def: ghBranch(j.default_branch) ? j.default_branch : '', pick: ghBranch(j.branch) ? j.branch : '',
+          note: txt(j.note), truncated: j.truncated === true, busy: false};
+        want = 'select';
+        paint();
+      }, e => {
+        if (dead) return;
+        pBusy = false;
+        setErr(e.message, submit, 'pub');
+        paint();
+        C.pubIn.focus();
+      });
+    }
+    function go(b) {
+      if (!sel || !br || sel.big || !C.sel.value) return;
+      run({kind: 'github', owner: sel.owner, repo: sel.repo, branch: C.sel.value, from: b});
+    }
+    function halt(id) { // 멈추기 for a download this page did not start; the stopped job's own sentence is said
+      api('/api/github/job/cancel', 'POST', {job: id}, GH_MS.job).then(j => {
+        if (dead) return;
+        const b = ghJob(j);
+        if (b && b.state === 'cancelled') note(b.message || '저장소 받기를 멈췄어요.');
+        load();
+      }, e => {
+        if (dead) return;
+        setErr(e.message, () => halt(id), 'top');
+        paint();
+      });
+    }
+
+    // ----- drawing, in place (putT, putA, putH), so the checks every second or two never move the focus -----
+    function paint() {
+      if (!C || dead) return;
+      const a = document.activeElement, inside = !!a && C.card.contains(a), m = mode(), P = ghRun;
+      const oj = !P && st && st.job && st.job.state === 'running' ? st.job : null;
+      if (!annT) {
+        putT(C.msg, !st && !E.text ? 'GitHub 연결 상태를 확인하고 있어요…' : msg);
+        Object.keys(C.err).forEach(k => putT(C.err[k].p, E.at === k ? E.text : ''));
+      }
+      Object.keys(C.err).forEach(k => { const on = !!E.text && E.at === k; putH(C.err[k].box, !on); putH(C.err[k].btn, !(on && E.retry)); });
+      putH(C.info, !(st && st.note));
+      putT(C.infoT, st ? st.note : '');
+      putH(C.lod, !(after && m === 'out' && st.settings));
+      if (st && st.settings) putA(C.lodA, 'href', st.settings);
+      paintProg(P);
+      putH(C.oth, !oj);
+      if (oj) putT(C.othN, oj.owner + '/' + oj.repo + (oj.branch ? ' · ' + oj.branch : ''));
+      const ak = !!ask && !P && !(oj && sameRepo(oj, ask)); // the running download is that repo: 이어서 보기 says it all
+      putH(C.ask, !ak);
+      if (ak) putT(C.askN, ask.owner + '/' + ask.repo + ' · ' + (ask.branch || '기본 브랜치'));
+      putH(C.out, m !== 'out');
+      putH(C.flow, m !== 'flow');
+      putH(C.inn, m !== 'in');
+      putT(C.loginT, again ? '새 코드 받기' : 'GitHub로 로그인');
+      putA(C.login, 'aria-disabled', String(iBusy));
+      if (m === 'flow') paintFlow(st.flow);
+      if (m === 'in') paintIn();
+      // the public form: in the logged-out view, or under 다른 공개 저장소 열기
+      const ph = m === 'in' ? C.pubi : C.pubo;
+      if (C.pubw.parentNode !== ph) {
+        const keep = C.pubw.contains(a);
+        ph.appendChild(C.pubw);
+        if (keep) { C.pubd.open = true; a.focus(); }
+      }
+      putH(C.pubWait, !pBusy);
+      paintBr();
+      C.ias.forEach(x => { putH(x, !(st && st.install)); if (st && st.install) putA(x, 'href', st.install); });
+      hold();
+      // The focus: where the last step wants it (once that is on screen), or on to the next useful control when the
+      // focused one went away. Only while the user is in this card or nowhere: a click elsewhere wins.
+      if (want) {
+        if (!a || a === document.body || inside || a.disabled) {
+          const t = target(want);
+          if (t !== undefined) { want = ''; if (t) t.focus(); }
+        } else want = '';
+      } else if (inside && !shown(a)) ([C.stop, C.login, C.q, C.loBtn].find(x => shown(x) && !x.disabled) || C.h).focus();
+    }
+    function paintProg(P) {
+      putH(C.prog, !P);
+      if (!P) return;
+      const dl = P.step === 'download', fin = dl && P.phase === 'finish', known = P.total > 0;
+      putT(C.ps, P.step === 'analyze' ? '분석 중이에요…' : fin ? '받은 내용을 확인하고 있어요…' : dl ? '저장소를 받고 있어요…' : '새 커밋이 있는지 확인하고 있어요…');
+      putT(C.pn, dl && !fin && P.read ? (known ? `${size(P.read)} / ${size(P.total)}` : size(P.read)) : ''); // not announced
+      putT(C.pf, [P.R.owner + '/' + P.R.repo + (P.R.branch ? ' · ' + P.R.branch : ''), dl && P.files ? `파일 ${fmt(P.files)}개` : '',
+        P.trouble ? '진행 상황을 받지 못하고 있어요. 계속 확인하고 있어요.' : ''].filter(Boolean).join(' · '));
+      putH(C.bar, !dl);
+      if (dl) {
+        C.bar.classList.toggle('ind', !known);
+        if (known) {
+          putA(C.bar, 'aria-valuemax', String(P.total));
+          putA(C.bar, 'aria-valuenow', String(Math.min(P.read, P.total)));
+          putA(C.bar, 'aria-valuetext', `${size(P.total)} 중 ${size(P.read)}`);
+          C.fill.style.width = Math.min(100, P.read / P.total * 100).toFixed(1) + '%';
+        } else { // no size yet: no aria-valuenow, and a bar that moves by itself
+          C.bar.removeAttribute('aria-valuenow');
+          C.bar.removeAttribute('aria-valuemax');
+          putA(C.bar, 'aria-valuetext', `${size(P.read)} 받음`);
+          C.fill.style.width = '';
+        }
+      }
+      putH(C.stopRow, !(dl && P.job));
+      putT(C.stop, P.stopping ? '멈추는 중…' : '멈추기');
+      putA(C.stop, 'aria-disabled', String(P.stopping));
+    }
+    function paintFlow(f) {
+      const w = f.state === 'waiting';
+      [C.hint, C.cbox, C.facts, C.warn, C.steps].forEach(x => putH(x, !w)); // finishing: the spinner line alone
+      if (w) {
+        const u = ghUrl(f.uri, st.fake);
+        putT(C.hint, copied === null ? '' : copied
+          ? "코드를 복사해 두었어요. 열린 GitHub 창에 붙여 넣고 허락해 주세요. GitHub 창이 열리지 않았으면 'GitHub 열기'를 눌러 주세요."
+          : "아래 코드를 GitHub 창에 넣고 허락해 주세요. 'GitHub 열기'를 누르면 창이 열려요.");
+        putT(C.codeV, f.code);
+        putT(C.codeS, '로그인 코드 ' + f.code.split('-').map(p => p.split('').join(' ')).join(', ')); // "W D J B, M J H T"
+        putH(C.verify, !u);
+        if (u) putA(C.verify, 'href', u);
+        timer();
+      }
+      putT(C.waitT, f.message || (w ? 'GitHub에서 허락하기를 기다리고 있어요…' : '로그인을 마무리하고 있어요…'));
+    }
+    function paintIn() {
+      const R = repos, all = R ? R.list : [], who = st.login || (R ? R.login : '');
+      putT(C.who, who ? 'GitHub 계정: ' + who : 'GitHub에 로그인되어 있어요.');
+      putH(C.lo, !lo);
+      putA(C.loYes, 'aria-disabled', String(oBusy));
+      putH(C.load, !(rBusy && !R)); // the first time only: a new list keeps the old one on screen until it comes
+      const ni = !!R && !R.installed, none = !!R && R.installed && !all.length;
+      putH(C.ni, !ni);
+      putH(C.none, !none);
+      putH(C.rn, !(R && R.note));
+      putT(C.rnT, R ? R.note : '');
+      putH(C.ls, !R || ni || none);
+      [C.refresh, ...C.reloads].forEach(x => putA(x, 'aria-disabled', String(rBusy)));
+      if (!R || ni || none) return;
+      const k = q.trim().toLowerCase(), hits = k ? all.filter(r => lc(r.owner + '/' + r.repo).includes(k)) : all;
+      putT(C.cnt, !hits.length ? '찾는 이름과 맞는 저장소가 없어요.' : k ? `저장소 ${fmt(all.length)}개 중 ${fmt(hits.length)}개` : `저장소 ${fmt(all.length)}개`);
+      putH(C.tr, !R.truncated);
+      putT(C.tr, `저장소가 많아서 처음 ${fmt(all.length)}개만 보여 줘요.`);
+      const rows = hits.slice(0, page), key = JSON.stringify(rows.map(r => [r.owner, r.repo, r.private, r.pushed, r.archived, r.big]));
+      if (key !== rowsK) {
+        rowsK = key;
+        const a = document.activeElement, ak = a && a.parentNode === C.list ? a.dataset.k : '';
+        C.list.textContent = '';
+        rows.forEach(r => C.list.appendChild(repoRow(r)));
+        const back = ak && [...C.list.children].find(b => b.dataset.k === ak);
+        if (back) back.focus();
+      }
+      const sk = sel && sel.from === 'list' ? lc(sel.owner + '/' + sel.repo) : '';
+      [...C.list.children].forEach(b => putA(b, 'aria-pressed', String(b.dataset.k === sk)));
+      const more = hits.length - rows.length;
+      putH(C.more, more <= 0);
+      putT(C.more, `${fmt(Math.min(GH_PAGE, more))}개 더 보기`);
+    }
+    // One repo: a lock for private ones, the name, then "공개 · 업데이트 3일 전 · 보관됨"; one whole name for screen readers.
+    function repoRow(r) {
+      const b = el('button', 'gh-it'), t = el('span', 'gh-t'), n = el('span', 'gh-n'), up = pushed(r.pushed);
+      const meta = [r.private ? '비공개' : '공개', up, r.archived ? '보관됨' : ''].filter(Boolean).join(' · ');
+      b.type = 'button';
+      b.dataset.gh = 'pick';
+      b.dataset.k = lc(r.owner + '/' + r.repo);
+      b.disabled = busy;
+      n.append(r.owner + '/', document.createElement('wbr'), r.repo);
+      t.append(n, el('span', 'gh-m', meta));
+      b.append(icon(r.private ? 'ti-lock' : 'ti-brand-github'), t);
+      if (r.big) { b.setAttribute('aria-disabled', 'true'); b.append(el('span', 'bd tw', '너무 커요')); } // a click says why
+      b.setAttribute('aria-label', `${r.owner}/${r.repo} ${meta.replace(/ · /g, ', ')}${r.big ? ', 너무 커요' : ''}`);
+      return b;
+    }
+    function paintBr() {
+      putH(C.br, !(sel && br));
+      if (!sel || !br) return;
+      const host = sel.from === 'pub' ? C.brp : C.brl;
+      if (C.br.parentNode !== host) host.appendChild(C.br);
+      putT(C.brN, sel.owner + '/' + sel.repo);
+      // Until the list comes: the branches already known (the default one, the one last opened); the default one first.
+      let names = br.list ? br.list.slice() : [br.def, br.pick, recentBranch(sel)].filter(Boolean);
+      if (br.def && names.includes(br.def)) names = [br.def].concat(names.filter(n => n !== br.def));
+      names = names.filter((n, i) => names.indexOf(n) === i);
+      const t = br.busy ? '브랜치 목록을 불러오고 있어요…' : sel.big ? '저장소가 너무 커서 CodeVision으로 받을 수 없어요.'
+        : br.list && !br.list.length ? '브랜치가 없어요. 빈 저장소일 수 있어요.'
+        : [br.note, br.truncated && br.list ? `브랜치가 많아서 처음 ${fmt(br.list.length)}개만 보여 줘요.` : ''].filter(Boolean).join(' ');
+      putH(C.bn, !t);
+      putT(C.bnT, t);
+      putH(C.bnI, !br.busy);
+      const ok = names.length > 0;
+      putH(C.brLab, !ok);
+      putH(C.brr, !ok);
+      if (optFor !== br) { optFor = br; optK = ''; C.sel.textContent = ''; } // another repo: no choice carries over
+      const key = JSON.stringify([names, br.def]);
+      if (key !== optK) {
+        optK = key;
+        const cur = C.sel.value;
+        C.sel.textContent = '';
+        names.forEach(n => { const o = el('option', '', n === br.def ? `${n} (기본)` : n); o.value = n; C.sel.appendChild(o); });
+        C.sel.value = [cur, br.pick, recentBranch(sel), br.def].find(x => x && names.includes(x)) || names[0] || '';
+      }
+      putA(C.go, 'aria-disabled', String(!ok || sel.big));
+    }
+    // What a focus request means now; undefined while it is not on screen yet (the first status, the first repo list).
+    function target(w) {
+      const m = mode();
+      if (typeof w === 'object') return w.isConnected && shown(w) && !w.disabled ? w : C.h; // the 열기 that started a download
+      if (w === 'h') return C.h;
+      if (!m) return undefined;
+      if (w === 'code') return m === 'flow' && shown(C.code) ? C.code : null;
+      if (w === 'login') return m === 'out' ? C.login : C.h;
+      if (w === 'list') return m !== 'in' ? (m === 'out' ? C.login : null) : !repos ? (rBusy ? undefined : C.h) : [C.q, ...C.ias, ...C.reloads].find(shown) || C.h;
+      if (w === 'select') return [C.sel, C.go].find(shown) || null;
+      if (w === 'stop') return shown(C.stop) ? C.stop : null;
+      if (w === 'lo') return shown(C.loYes) ? C.loYes : null;
+      if (w === 'acct') return shown(C.loBtn) ? C.loBtn : null;
+      return null;
+    }
+    function hold() { // while a project opens (lock), everything here waits but 멈추기
+      C.card.querySelectorAll('button, input, select').forEach(x => { if (!x.hasAttribute('data-keep') && x.disabled !== busy) x.disabled = busy; });
+    }
+    // Logged in: the GitHub card goes first. The folder card is the one that moves, so the focus in this card stays.
+    function order() {
+      const fcard = C && C.card.parentNode ? C.card.parentNode.querySelector('.st-card') : null;
+      if (!fcard || fcard.contains(document.activeElement) || C.card.compareDocumentPosition(fcard) & Node.DOCUMENT_POSITION_FOLLOWING) return;
+      C.card.after(fcard);
+    }
+
+    function act(a, b) {
+      if (dead || !C) return;
+      if (b.getAttribute('aria-disabled') === 'true') { if (a === 'pick') pick(b.dataset.k); return; } // a repo too big says why
+      if (a !== 'copy' && a !== 'more' && a !== 'stop') { msg = ''; after = false; }
+      const j = st && st.job && ghName(st.job.owner, st.job.repo) ? st.job : null;
+      if (a === 'login') login();
+      else if (a === 'cancel') cancel();
+      else if (a === 'copy') copy();
+      else if (a === 'logout') { lo = true; clearErr(); want = 'lo'; paint(); }
+      else if (a === 'stay') { lo = false; want = 'acct'; paint(); }
+      else if (a === 'out') logout();
+      else if (a === 'reload' || a === 'refresh') loadRepos(true);
+      else if (a === 'more') { const n = page; page += GH_PAGE; paint(); const r = C.list.children[n]; if (r) r.focus(); }
+      else if (a === 'pick') pick(b.dataset.k);
+      else if (a === 'go') go(b);
+      else if (a === 'retry') { const f = E.retry; clearErr(); paint(); if (f) f(); }
+      else if (a === 'ask') { const w = ask; ask = null; if (w) run({kind: 'github', owner: w.owner, repo: w.repo, branch: w.branch, from: b}); }
+      else if (a === 'noask') { ask = null; setQuery(null); want = 'h'; paint(); }
+      else if (a === 'follow' && j) run({kind: 'github', owner: j.owner, repo: j.repo, branch: j.branch, job: j.id, from: b});
+      else if (a === 'halt' && j) halt(j.id);
+      else if (a === 'stop') stopRun();
+      else paint();
+    }
+    function key(e) { // Esc closes the logout question
+      if (dead || !C || !lo || oBusy || (e.key !== 'Escape' && e.key !== 'Esc')) return;
+      const a = document.activeElement;
+      if (a && a !== document.body && !C.card.contains(a)) return;
+      e.preventDefault();
+      lo = false;
+      want = 'acct';
+      paint();
+    }
+    function vis() { // back from GitHub's page in another tab
+      if (dead || document.visibilityState !== 'visible') return;
+      if (mode() === 'in' && repos && !repos.installed && !rBusy) loadRepos(true); // the app may be installed now
+      load();
+    }
+    function attach() {
+      const card = app.querySelector('.gh');
+      if (!card) return;
+      const $ = s => card.querySelector(s), err = {};
+      card.querySelectorAll('.gh-err').forEach(b => { err[b.dataset.err] = {box: b, p: b.firstChild, btn: b.lastChild}; });
+      C = {card, err, h: $('#cv-gh-h'), msg: $('.gh-msg'), lod: $('.gh-lod'), info: $('.gh-info:not(.gh-rn)'), rn: $('.gh-rn'), prog: $('.gh-prog'), ps: $('.gh-ps'),
+        pn: $('.gh-pn'), pf: $('.gh-pf'), bar: $('.gh-bar'), stop: $('[data-gh="stop"]'), oth: $('.gh-oth'), ask: $('.gh-ask'),
+        out: $('.gh-out'), login: $('[data-gh="login"]'), pubo: $('.gh-pubo'), flow: $('.gh-flow'), hint: $('.gh-hint'), cbox: $('.gh-cb'),
+        code: $('.gh-code'), timer: $('.gh-timer'), copy: $('[data-gh="copy"]'), verify: $('.gh-vf'), warn: $('.gh-warn'), steps: $('.gh-steps'),
+        waitT: $('.gh-wait span'), inn: $('.gh-in'), who: $('.gh-who'), loBtn: $('[data-gh="logout"]'), lo: $('.gh-lo'), loYes: $('[data-gh="out"]'),
+        load: $('.gh-load'), ni: $('.gh-ni'), none: $('.gh-none'), ls: $('.gh-ls'), q: $('#cv-gh-q'), cnt: $('.gh-cnt'), tr: $('.gh-tr'),
+        list: $('.gh-list'), more: $('.gh-more'), brl: $('.gh-brl'), refresh: $('[data-gh="refresh"]'), pubd: $('.gh-pubd'), pubi: $('.gh-pubi'),
+        pubw: $('.gh-pubw'), pubIn: $('#cv-gh-repo'), pubWait: $('.gh-pw'), brp: $('.gh-brp'), br: $('.gh-br'), brN: $('.gh-sel .gh-nm'),
+        bn: $('.gh-bn'), brLab: $('label[for="cv-gh-br"]'), brr: $('.gh-brr'), sel: $('#cv-gh-br'), go: $('[data-gh="go"]'),
+        ias: [...card.querySelectorAll('.gh-ia')], reloads: [...card.querySelectorAll('[data-gh="reload"]')]};
+      C.lodA = C.lod.firstChild;
+      C.infoT = C.info.lastChild;
+      C.rnT = C.rn.lastChild;
+      C.fill = C.bar.firstChild;
+      C.stopRow = C.stop.parentNode;
+      C.othN = C.oth.querySelector('.gh-nm');
+      C.askN = C.ask.querySelector('.gh-nm');
+      C.loginT = C.login.lastChild;
+      C.facts = C.copy.parentNode;
+      C.codeV = C.code.firstChild;
+      C.codeS = C.code.lastChild;
+      C.copyI = C.copy.firstChild;
+      C.bnI = C.bn.firstChild;
+      C.bnT = C.bn.lastChild;
+      C.q.addEventListener('input', () => { q = C.q.value; page = GH_PAGE; paint(); });
+      C.sel.addEventListener('change', () => { if (br) br.pick = C.sel.value; });
+      C.pubIn.value = ghTyped;
+      C.pubIn.addEventListener('input', () => { ghTyped = C.pubIn.value; });
+      paint();
+      load();
+    }
+    function quit() {
+      dead = true;
+      clearTimeout(sT);
+      clearInterval(tickT);
+      clearTimeout(annT);
+      clearTimeout(cpT);
+    }
+    return {attach, paint, act, key, vis, submit, quit,
+      ask(w) { ask = w; paint(); },
+      prog(first) { paint(); if (first && C) C.prog.scrollIntoView({block: 'nearest'}); },
+      focus(w) { want = w; paint(); },
+      note(t) { note(t); },
+      err(t) { setErr(t, null, 'top'); paint(); }};
+  }
+
+  // A repo opening: POST /api/github/open (the server asks GitHub for the branch's newest commit), the download job when
+  // that commit is new on this PC, then /api/analyze on the snapshot. r: {kind: 'github', owner, repo, branch ('': the
+  // default one), job (a download that already runs: followed instead of asking open), from (the control that started
+  // it; the focus goes back there after 멈추기)}.
+  async function runGh(r) {
+    const me = ++ghN, from = r.from || null, gone = () => me !== ghN || screen !== 'start';
+    let R = last = {kind: 'github', owner: r.owner, repo: r.repo, branch: r.branch || ''}, jobId = r.job || '', again = false;
+    let said = null; // the note of this page's own open reply (null while it follows a job it did not ask for: 이어서 보기)
+    const P = ghRun = {R, step: 'check', job: '', phase: '', read: 0, total: 0, files: 0, stopping: false, trouble: false};
+    setQuery(R);
+    lock(true);
+    if (gh) gh.prog(true);
+    for (;;) {
+      let j;
+      if (jobId) { j = ghJob({job: jobId, state: 'running', owner: R.owner, repo: R.repo, branch: R.branch}); jobId = ''; }
+      else {
+        P.step = 'check';
+        if (gh) gh.prog();
+        try { j = ghJob(await api('/api/github/open', 'POST', {owner: R.owner, repo: R.repo, branch: R.branch}, GH_MS.open)); } catch (e) {
+          if (!gone()) ghFail(e);
+          return;
+        }
+        if (gone()) return;
+        if (!j) { ghFail(fail('요청을 처리하지 못했어요. 잠시 뒤에 다시 해 주세요.')); return; }
+        said = j.note;
+      }
+      // GitHub's own spelling of the names, and the branch the server opened
+      if (ghName(j.owner, j.repo)) R = P.R = last = {kind: 'github', owner: j.owner, repo: j.repo, branch: j.branch && ghBranch(j.branch) ? j.branch : R.branch};
+      setQuery(R);
+      if (j.state === 'running') {
+        P.job = j.id;
+        P.step = 'download';
+        took(P, j);
+        if (gh) { gh.prog(); gh.focus('stop'); }
+        try { j = await follow(me, P); } catch (e) {
+          if (!gone()) ghFail(e);
+          return;
+        }
+        if (gone()) return;
+      }
+      if (j.state === 'cancelled') { ghStopped(j, from); return; }
+      if (j.state !== 'done' || !GH_SHA.test(j.sha)) { ghFail(fail(j.message || '저장소를 받지 못했어요. 다시 해 주세요.', j.code)); return; }
+      // Said on the project screen, first in its warnings and once for screen readers: no new commit or GitHub out of
+      // reach (open's done block), and a branch opened before that is gone, so the default one was opened (the note of
+      // open's reply, or of the job's last block when this page followed a job it did not ask for).
+      const notes = [j.cached || j.offline ? j.message : '', said === null ? j.note : said].filter(Boolean);
+      P.step = 'analyze';
+      P.job = '';
+      if (gh) gh.prog();
+      let g;
+      try { g = await api(analyzeUrl({kind: 'github', owner: R.owner, repo: R.repo, branch: R.branch, sha: j.sha})); } catch (e) {
+        if (gone()) return;
+        if (e.code === 'snapshot_missing' && !again) { again = true; continue; } // removed meanwhile: open it once more
+        ghFail(e);
+        return;
+      }
+      if (gone()) return;
+      ghRun = null;
+      lock(false);
+      if (notes.length && g && typeof g === 'object') g.warnings = notes.concat(list(g.warnings).filter(w => !notes.includes(w)));
+      showProject(g);
+      if (notes.length && screen === 'project') announce(notes.join(' '));
+      return;
+    }
+  }
+  // The job, checked every second (longer while the checks fail) until it ends; returns its last block.
+  async function follow(me, P) {
+    for (let fails = 0; ;) {
+      await sleep(fails ? Math.min(10000, GH_JOB * 2 ** fails) : GH_JOB);
+      if (me !== ghN) throw fail('', 'gone');
+      let j;
+      try { j = ghJob(await api('/api/github/job?id=' + encodeURIComponent(P.job), 'GET', null, GH_MS.job)); } catch (e) {
+        if (me !== ghN || e.status === 404) throw e; // job_not_found: gone with a restart of CodeVision
+        P.trouble = ++fails >= 3;
+        if (gh) gh.prog();
+        continue;
+      }
+      fails = 0;
+      P.trouble = false;
+      if (!j) continue;
+      took(P, j);
+      if (gh) gh.prog();
+      if (j.state !== 'running') return j;
+    }
+  }
+  const took = (P, j) => { P.phase = j.phase; P.read = j.read; P.total = j.total; P.files = j.files; };
+  function stopRun() {
+    const P = ghRun;
+    if (!P || !P.job || P.stopping) return;
+    P.stopping = true;
+    if (gh) gh.prog();
+    api('/api/github/job/cancel', 'POST', {job: P.job}, GH_MS.job).then(() => {}, e => {
+      if (ghRun !== P) return;
+      P.stopping = false;
+      if (gh) { gh.prog(); gh.err(e.message); }
+    });
+  }
+  function ghStopped(j, from) {
+    ghRun = null;
+    lock(false);
+    setQuery(null);
+    if (!gh) return;
+    gh.note(j.message || '저장소 받기를 멈췄어요.');
+    gh.focus(from || 'h');
+  }
+  function ghFail(e) {
+    ghRun = null;
+    lock(false);
+    showError(e.message, e);
+  }
+  // The open's sentence for screen readers too, in #cv-say like aiCtl's news.
+  function announce(t) {
+    const r = app.querySelector('#cv-say');
+    if (!r) return;
+    r.textContent = '';
+    setTimeout(() => { if (r.isConnected) r.textContent = t; }, 50);
+  }
+  // ?github=owner/repo&branch=… at start-up (a reload, or a link from any site): it opens by itself only when the recent
+  // list has that repo; any other repo waits for one click in the GitHub card (showStart). No address logs in or out.
+  function startGh(t, b) {
+    const m = /^([^/]+)\/([^/]+)$/.exec(t), ok = !!m && ghName(m[1], m[2]) && ghBranch(b);
+    if (!ok) setQuery(null);
+    showStart('', ok ? {owner: m[1], repo: m[2], branch: b} : null);
+  }
+
   // ---------- events and start-up ----------
   app.addEventListener('click', e => {
     const b = e.target.closest('[data-act]');
@@ -1470,9 +2413,13 @@
     const a = b.dataset.act;
     if (a === 'pick') run({kind: 'pick'});
     else if (a === 'demo') run({kind: 'demo'});
-    else if (a === 'recent') run({kind: 'path', path: b.dataset.path});
-    else if (a === 'retry') { if (last) run(last); }
-    else if (a === 'home') { setQuery(null); showStart('[data-act="pick"]'); }
+    else if (a === 'recent') {
+      const d = b.dataset;
+      run(d.kind === 'github' ? {kind: 'github', owner: d.owner, repo: d.repo, branch: d.branch || '', from: b} : {kind: 'path', path: d.path});
+    } else if (a === 'retry') { if (last) run(last); }
+    // 다른 프로젝트 and 처음 화면으로: back to the GitHub card from a repo, else to 폴더 선택…
+    else if (a === 'home') { const g = !!last && last.kind === 'github'; setQuery(null); showStart(g ? '#cv-gh-h' : '[data-act="pick"]'); }
+    else if (a === 'gh-login') { setQuery(null); showStart('', null, 'login'); } // 로그인하러 가기
     else if (a === 'ai') { if (aic) aic.toggle(); }
   });
   // The AI panel's controls, and the AI line in the side panel (aiCtl).
@@ -1480,11 +2427,19 @@
     const b = e.target.closest('[data-ai]');
     if (b && aic) aic.act(b.dataset.ai, b);
   });
-  document.addEventListener('keydown', e => { if (aic) aic.key(e); });
+  // The GitHub card's controls (ghCtl).
+  app.addEventListener('click', e => {
+    const b = e.target.closest('[data-gh]');
+    if (b && gh && !b.disabled) gh.act(b.dataset.gh, b);
+  });
+  document.addEventListener('keydown', e => { if (aic) aic.key(e); if (gh) gh.key(e); });
   document.addEventListener('pointerdown', e => { if (aic) aic.down(e); }, true);
+  document.addEventListener('visibilitychange', () => { if (gh) gh.vis(); });
   if (SHEET.addEventListener) SHEET.addEventListener('change', () => { if (aic) aic.media(); });
+  // No form submits by itself (the CSP has form-action 'none'): the folder path, or the GitHub card's public repo.
   app.addEventListener('submit', e => {
     e.preventDefault();
+    if (e.target.closest('.gh-pub')) { if (gh) gh.submit(); return; }
     const inp = app.querySelector('#cv-path');
     const v = inp ? inp.value.trim().replace(/^"(.*)"$/, '$1').trim() : '';
     if (v) { run({kind: 'path', path: v}); return; }
@@ -1503,6 +2458,7 @@
     const q = new URLSearchParams(location.search);
     if (q.get('demo') === '1') run({kind: 'demo'});
     else if (q.get('path')) run({kind: 'path', path: q.get('path')});
+    else if (q.get('github')) startGh(q.get('github'), q.get('branch') || '');
     else showStart();
   }
 })();

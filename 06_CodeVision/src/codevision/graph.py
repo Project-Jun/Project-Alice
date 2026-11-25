@@ -22,6 +22,8 @@ The rules (areas, entries, orphans, HTTP links, focus) are in section 5, with th
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -148,13 +150,36 @@ def _canon(names) -> set[str]:
 
 # ---------------------------------------------------------------- analyzer calls (never raise)
 
+# While a private GitHub snapshot is analyzed (see private_names), these logs name no file, no import and
+# give only the exception's type: logs never tell what a private repo holds.
+_PRIVATE = contextvars.ContextVar("codevision_graph_private", default=False)
+
+
+@contextlib.contextmanager
+def private_names():
+    """Within this block, the analysis logs no file names and no exception texts (a private repo)."""
+    token = _PRIVATE.set(True)
+    try:
+        yield
+    finally:
+        _PRIVATE.reset(token)
+
+
+def _shown(value):
+    """A file name, an import or an exception as a log line shows it: in a private repo, an exception's type
+    and nothing else."""
+    if not _PRIVATE.get():
+        return value
+    return type(value).__name__ if isinstance(value, BaseException) else "(private)"
+
+
 def _analyze(module, rel: str, text: str) -> FileFacts:
     try:
         facts = module.analyze(rel, text)
         if isinstance(facts, FileFacts):
             return facts
     except Exception as exc:
-        log.warning("analyze failed for %s: %s", rel, exc)
+        log.warning("analyze failed for %s: %s", _shown(rel), _shown(exc))
     ext = describe.extension(rel)
     language = "python" if ext in PY_EXTS else "typescript" if ext in TS_EXTS else "javascript"
     return FileFacts(path=rel, language=language, lines=len(text.splitlines()), parse_error=True)
@@ -164,7 +189,7 @@ def _resolve(module, imp, rel: str, index) -> list[str]:
     try:
         return [t for t in (module.resolve(imp, rel, index) or []) if isinstance(t, str)]
     except Exception as exc:
-        log.warning("resolve failed for %s (%s): %s", rel, getattr(imp, "spec", "?"), exc)
+        log.warning("resolve failed for %s (%s): %s", _shown(rel), _shown(getattr(imp, "spec", "?")), _shown(exc))
         return []
 
 
@@ -172,7 +197,7 @@ def _project_entries(module, index) -> dict[str, str]:
     try:
         return {str(k): str(v or "") for k, v in dict(module.project_entries(index) or {}).items()}
     except Exception as exc:
-        log.warning("project_entries failed in %s: %s", getattr(module, "__name__", module), exc)
+        log.warning("project_entries failed in %s: %s", getattr(module, "__name__", module), _shown(exc))
         return {}
 
 
@@ -184,7 +209,7 @@ def _project_links(module, index) -> dict[str, list[str]]:
     try:
         return {str(k): [t for t in (v or []) if isinstance(t, str)] for k, v in dict(hook(index) or {}).items()}
     except Exception as exc:
-        log.warning("project_links failed in %s: %s", getattr(module, "__name__", module), exc)
+        log.warning("project_links failed in %s: %s", getattr(module, "__name__", module), _shown(exc))
         return {}
 
 
@@ -197,7 +222,7 @@ def _project_loaded(module, index) -> dict[str, str]:
     try:
         return {str(k): str(v or "") for k, v in dict(hook(index) or {}).items()}
     except Exception as exc:
-        log.warning("project_loaded failed in %s: %s", getattr(module, "__name__", module), exc)
+        log.warning("project_loaded failed in %s: %s", getattr(module, "__name__", module), _shown(exc))
         return {}
 
 
